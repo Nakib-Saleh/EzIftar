@@ -1,0 +1,241 @@
+name: EzIftar CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres-identity:
+        image: postgres:14-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: identity_db
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      postgres-stock:
+        image: postgres:14-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: stock_db
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      postgres-kitchen:
+        image: postgres:14-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: kitchen_db
+        ports:
+          - 5435:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      rabbitmq:
+        image: rabbitmq:3-management
+        ports:
+          - 5672:5672
+          - 15672:15672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics check_port_connectivity"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
+      # Identity Provider
+      - name: Install identity-provider dependencies
+        working-directory: ./services/identity-provider
+        run: bun install
+
+      - name: Generate Prisma client (identity-provider)
+        working-directory: ./services/identity-provider
+        run: bunx prisma generate
+
+      - name: Run Prisma migrations (identity-provider)
+        working-directory: ./services/identity-provider
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5433/identity_db?schema=public
+        run: bunx prisma db push
+
+      - name: Build identity-provider
+        working-directory: ./services/identity-provider
+        run: bun build ./src/index.ts --outdir ./dist --target node
+
+      - name: Test identity-provider
+        working-directory: ./services/identity-provider
+        run: bun test
+
+      # Stock Service
+      - name: Install stock-service dependencies
+        working-directory: ./services/stock-service
+        run: bun install
+
+      - name: Generate Prisma client (stock-service)
+        working-directory: ./services/stock-service
+        run: bunx prisma generate
+
+      - name: Run Prisma migrations (stock-service)
+        working-directory: ./services/stock-service
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5434/stock_db?schema=public
+        run: bunx prisma db push
+
+      - name: Build stock-service
+        working-directory: ./services/stock-service
+        run: bun build ./src/index.ts --outdir ./dist --target node
+
+      - name: Test stock-service
+        working-directory: ./services/stock-service
+        run: bun test
+
+      # Kitchen Service
+      - name: Install kitchen-service dependencies
+        working-directory: ./services/kitchen-service
+        run: bun install
+
+      - name: Generate Prisma client (kitchen-service)
+        working-directory: ./services/kitchen-service
+        run: bunx prisma generate
+
+      - name: Run Prisma migrations (kitchen-service)
+        working-directory: ./services/kitchen-service
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5435/kitchen_db?schema=public
+        run: bunx prisma db push
+
+      - name: Build kitchen-service
+        working-directory: ./services/kitchen-service
+        run: bun build ./src/index.ts --outdir ./dist --target node
+
+      - name: Test kitchen-service
+        working-directory: ./services/kitchen-service
+        run: bun test
+
+      # Order Gateway
+      - name: Install order-gateway dependencies
+        working-directory: ./services/order-gateway
+        run: bun install
+
+      - name: Build order-gateway
+        working-directory: ./services/order-gateway
+        run: bun build ./src/index.ts --outdir ./dist --target node
+
+      - name: Test order-gateway
+        working-directory: ./services/order-gateway
+        run: bun test
+
+      # Notification Hub
+      - name: Install notification-hub dependencies
+        working-directory: ./services/notification-hub
+        run: bun install
+
+      - name: Build notification-hub
+        working-directory: ./services/notification-hub
+        run: bun build ./src/index.ts --outdir ./dist --target node
+
+      - name: Test notification-hub
+        working-directory: ./services/notification-hub
+        run: bun test
+
+      # Frontend
+      - name: Install frontend dependencies
+        working-directory: ./services/frontend
+        run: bun install
+
+      - name: Build frontend
+        working-directory: ./services/frontend
+        run: bun run build
+
+  docker-build:
+    runs-on: ubuntu-latest
+    needs: build-and-test
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build identity-provider image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./services/identity-provider
+          push: false
+          tags: eziftar/identity-provider:latest
+
+      - name: Build order-gateway image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./services/order-gateway
+          push: false
+          tags: eziftar/order-gateway:latest
+
+      - name: Build stock-service image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./services/stock-service
+          push: false
+          tags: eziftar/stock-service:latest
+
+      - name: Build kitchen-service image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./services/kitchen-service
+          push: false
+          tags: eziftar/kitchen-service:latest
+
+      - name: Build notification-hub image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./services/notification-hub
+          push: false
+          tags: eziftar/notification-hub:latest
+
+      - name: Build frontend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./services/frontend
+          push: false
+          tags: eziftar/frontend:latest

@@ -1,0 +1,39 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "identity-provider"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["identity-provider:3000"]
+        labels:
+          service: "identity-provider"
+
+  - job_name: "order-gateway"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["order-gateway:8080"]
+        labels:
+          service: "order-gateway"
+
+  - job_name: "stock-service"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["stock-service:3002"]
+        labels:
+          service: "stock-service"
+
+  - job_name: "kitchen-service"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["kitchen-service:3003"]
+        labels:
+          service: "kitchen-service"
+
+  - job_name: "notification-hub"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["notification-hub:3004"]
+        labels:
+          service: "notification-hub"

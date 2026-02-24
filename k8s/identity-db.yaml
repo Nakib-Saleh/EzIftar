@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: identity-db
+  labels:
+    app: identity-db
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: identity-db
+  template:
+    metadata:
+      labels:
+        app: identity-db
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:14-alpine
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: eziftar-secrets
+                  key: postgres-user
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: eziftar-secrets
+                  key: postgres-password
+            - name: POSTGRES_DB
+              value: "identity_db"
+          volumeMounts:
+            - name: identity-db-data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: identity-db-data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: identity-db
+spec:
+  selector:
+    app: identity-db
+  ports:
+    - port: 5432
+      targetPort: 5432
+  type: ClusterIP

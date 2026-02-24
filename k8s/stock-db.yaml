@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stock-db
+  labels:
+    app: stock-db
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: stock-db
+  template:
+    metadata:
+      labels:
+        app: stock-db
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:14-alpine
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: eziftar-secrets
+                  key: postgres-user
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: eziftar-secrets
+                  key: postgres-password
+            - name: POSTGRES_DB
+              value: "stock_db"
+          volumeMounts:
+            - name: stock-db-data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: stock-db-data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: stock-db
+spec:
+  selector:
+    app: stock-db
+  ports:
+    - port: 5432
+      targetPort: 5432
+  type: ClusterIP

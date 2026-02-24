@@ -1,0 +1,30 @@
+{
+  "name": "order-gateway",
+  "version": "1.0.0",
+  "description": "Order Gateway - API Gateway with JWT Validation & Cache Stock Check",
+  "main": "dist/index.js",
+  "scripts": {
+    "start": "bun dist/index.js",
+    "dev": "bun --watch src/index.ts",
+    "build": "bun build ./src/index.ts --outdir ./dist --target node",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "http-proxy-middleware": "^2.0.6",
+    "cors": "^2.8.5",
+    "axios": "^1.6.7",
+    "jsonwebtoken": "^9.0.2",
+    "ioredis": "^5.3.2",
+    "prom-client": "^15.1.0",
+    "amqplib": "^0.10.3",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3",
+    "@types/node": "^20.11.20",
+    "@types/express": "^4.17.21",
+    "@types/cors": "^2.8.17",
+    "@types/jsonwebtoken": "^9.0.5"
+  }
+}

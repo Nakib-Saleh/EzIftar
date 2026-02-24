@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kitchen-db
+  labels:
+    app: kitchen-db
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kitchen-db
+  template:
+    metadata:
+      labels:
+        app: kitchen-db
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:14-alpine
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: eziftar-secrets
+                  key: postgres-user
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: eziftar-secrets
+                  key: postgres-password
+            - name: POSTGRES_DB
+              value: "kitchen_db"
+          volumeMounts:
+            - name: kitchen-db-data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: kitchen-db-data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kitchen-db
+spec:
+  selector:
+    app: kitchen-db
+  ports:
+    - port: 5432
+      targetPort: 5432
+  type: ClusterIP

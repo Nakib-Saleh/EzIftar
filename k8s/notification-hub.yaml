@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notification-hub
+  labels:
+    app: notification-hub
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: notification-hub
+  template:
+    metadata:
+      labels:
+        app: notification-hub
+    spec:
+      containers:
+        - name: notification-hub
+          image: eziftar/notification-hub:latest
+          ports:
+            - containerPort: 3004
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3004
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3004
+            initialDelaySeconds: 15
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: notification-hub
+  labels:
+    app: notification-hub
+spec:
+  selector:
+    app: notification-hub
+  ports:
+    - port: 3004
+      targetPort: 3004
+  type: ClusterIP
