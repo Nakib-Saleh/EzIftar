@@ -58,6 +58,10 @@ app.use((req, res, next) => {
 // Health Check
 // ============================================
 app.get("/health", async (req: Request, res: Response) => {
+  if (shuttingDown) {
+    res.status(503).json({ status: "DOWN", service: "stock-service", reason: "SHUTTING_DOWN" });
+    return;
+  }
   try {
     await prisma.$queryRaw`SELECT 1`;
     res
@@ -271,9 +275,12 @@ app.post("/stock/deduct", async (req: Request, res: Response) => {
 // ============================================
 // Admin: Shutdown (for Chaos Toggle)
 // ============================================
+let shuttingDown = false;
+
 app.post("/admin/shutdown", (req: Request, res: Response) => {
+  shuttingDown = true;
   res.json({ message: "Stock service shutting down..." });
-  setTimeout(() => process.exit(1), 500);
+  setTimeout(() => process.exit(1), 8000);
 });
 
 app.listen(PORT, async () => {

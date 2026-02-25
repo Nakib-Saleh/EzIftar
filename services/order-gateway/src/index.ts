@@ -155,10 +155,56 @@ const jwtMiddleware = (req: Request, res: Response, next: NextFunction) => {
 };
 
 // ============================================
-// Health Check (Gateway + Dependencies)
+// Health Check (Gateway + Dependencies) — Aggregated
 // ============================================
 app.get("/health", async (req: Request, res: Response) => {
-  res.status(200).json({ status: "UP", service: "order-gateway" });
+  const checks: Record<string, string> = {};
+  let allUp = true;
+
+  // Check Redis
+  try {
+    if (redis) {
+      await redis.ping();
+      checks.redis = "UP";
+    } else {
+      checks.redis = "DOWN";
+      allUp = false;
+    }
+  } catch {
+    checks.redis = "DOWN";
+    allUp = false;
+  }
+
+  // Check RabbitMQ channel
+  checks.rabbitmq = channel ? "UP" : "DOWN";
+  if (!channel) allUp = false;
+
+  // Check downstream services
+  const downstreamServices: [string, string][] = [
+    ["identity-provider", IDENTITY_PROVIDER_URL],
+    ["stock-service", STOCK_SERVICE_URL],
+    ["kitchen-service", KITCHEN_SERVICE_URL],
+    ["notification-hub", NOTIFICATION_HUB_URL],
+  ];
+
+  await Promise.all(
+    downstreamServices.map(async ([name, url]) => {
+      try {
+        await axios.get(`${url}/health`, { timeout: 2000 });
+        checks[name] = "UP";
+      } catch {
+        checks[name] = "DOWN";
+        allUp = false;
+      }
+    }),
+  );
+
+  const status = allUp ? 200 : 503;
+  res.status(status).json({
+    status: allUp ? "UP" : "DEGRADED",
+    service: "order-gateway",
+    dependencies: checks,
+  });
 });
 
 app.get("/api/health/gateway", (req: Request, res: Response) => {
@@ -312,6 +358,23 @@ app.post("/api/orders", jwtMiddleware, async (req: Request, res: Response) => {
   }
 
   try {
+    // Generate orderId early so we can emit PENDING status
+    const orderId = `order-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+
+    // Emit PENDING status via Notification Hub (fire-and-forget)
+    axios
+      .post(
+        `${NOTIFICATION_HUB_URL}/notify`,
+        {
+          orderId,
+          status: "PENDING",
+          studentId: user.studentId,
+          timestamp: new Date().toISOString(),
+        },
+        { timeout: 1000 },
+      )
+      .catch(() => {});
+
     // Step 1: Check Redis cache for stock availability
     if (redis) {
       try {
@@ -327,15 +390,10 @@ app.post("/api/orders", jwtMiddleware, async (req: Request, res: Response) => {
     }
 
     // Step 2: Call Stock Service to deduct inventory (with timeout)
-    const orderId = `order-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
     const stockResponse = await axios.post(
       `${STOCK_SERVICE_URL}/stock/deduct`,
-      {
-        itemId,
-        quantity,
-        orderId,
-      },
+      { itemId, quantity, orderId },
       { timeout: 2000 },
     );
 

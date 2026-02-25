@@ -180,7 +180,7 @@ function App() {
   const fetchStats = useCallback(async () => {
     try {
       const res = await axios.get(`${API_GATEWAY_URL}/stats/gateway`);
-      setAvgLatency(res.data.averageLatency);
+      setAvgLatency(res.data.averageLatencyMs / 1000);
     } catch {
       console.error("Stats fetch failed");
     }
@@ -707,19 +707,163 @@ const ServiceMetricsViewer = ({
 }) => {
   const [showRaw, setShowRaw] = useState(false);
 
+  // Metric value extractor — handles both labeled and unlabeled metrics.
+  // For labeled metrics (e.g. histogram _sum/_count), sums across all label combos.
   const getValue = (key: string) => {
-    const match = rawData.match(new RegExp(`${key} ([0-9.]+)`));
+    // Try exact match first (unlabeled: "metric_name 123")
+    const exactMatch = rawData.match(new RegExp(`^${key} ([0-9.e+-]+)`, "m"));
+    if (exactMatch) return parseFloat(exactMatch[1]);
+    // Sum across all labeled instances: "metric_name{...} 123"
+    const regex = new RegExp(
+      `^${key}\\{[^}]*\\}\\s+([0-9.e+-]+)`,
+      "gm",
+    );
+    let total = 0;
+    let found = false;
+    let match;
+    while ((match = regex.exec(rawData)) !== null) {
+      total += parseFloat(match[1]);
+      found = true;
+    }
+    return found ? total : 0;
+  };
+
+  // Labeled metric extractor e.g. orders_total{status="accepted"} 42
+  const getLabeledValue = (metric: string, label: string, value: string) => {
+    const regex = new RegExp(
+      `${metric}\\{[^}]*${label}="${value}"[^}]*\\}\\s+([0-9.e+-]+)`,
+    );
+    const match = rawData.match(regex);
     return match ? parseFloat(match[1]) : 0;
   };
 
+  // Process metrics
   const cpu = getValue("process_cpu_user_seconds_total");
   const memory = getValue("process_resident_memory_bytes");
   const heap = getValue("nodejs_heap_size_used_bytes");
   const uptime = getValue("process_uptime_seconds");
   const handles = getValue("nodejs_active_handles");
   const lag = getValue("nodejs_eventloop_lag_seconds");
-
   const formatBytes = (bytes: number) => (bytes / 1024 / 1024).toFixed(1);
+
+  // Business metrics — per service
+  const svcKey = name.toLowerCase();
+  const isGateway = svcKey.includes("gateway");
+  const isIdentity = svcKey.includes("identity");
+  const isStock = svcKey.includes("stock");
+  const isKitchen = svcKey.includes("kitchen");
+  const isNotification = svcKey.includes("notification");
+
+  // Avg latency from histogram (sum/count)
+  const httpSum = getValue("http_request_duration_seconds_sum");
+  const httpCount = getValue("http_request_duration_seconds_count");
+  const avgLatencyMs =
+    httpCount > 0 ? ((httpSum / httpCount) * 1000).toFixed(1) : "0.0";
+
+  // Build business metric cards
+  const businessMetrics: {
+    label: string;
+    value: string;
+    color: string;
+  }[] = [];
+
+  if (isGateway) {
+    businessMetrics.push({
+      label: "Orders Accepted",
+      value: getLabeledValue("orders_total", "status", "accepted").toString(),
+      color: "var(--success)",
+    });
+    businessMetrics.push({
+      label: "Orders Failed",
+      value: getValue("orders_failed_total").toString(),
+      color: "var(--danger)",
+    });
+  }
+  if (isIdentity) {
+    businessMetrics.push({
+      label: "Login Success",
+      value: getLabeledValue(
+        "login_attempts_total",
+        "status",
+        "success",
+      ).toString(),
+      color: "var(--success)",
+    });
+    businessMetrics.push({
+      label: "Login Failed",
+      value: getLabeledValue(
+        "login_attempts_total",
+        "status",
+        "failed",
+      ).toString(),
+      color: "var(--danger)",
+    });
+  }
+  if (isStock) {
+    businessMetrics.push({
+      label: "Deductions OK",
+      value: getLabeledValue(
+        "stock_deductions_total",
+        "status",
+        "success",
+      ).toString(),
+      color: "var(--success)",
+    });
+    businessMetrics.push({
+      label: "Deductions Failed",
+      value: getLabeledValue(
+        "stock_deductions_total",
+        "status",
+        "failed",
+      ).toString(),
+      color: "var(--danger)",
+    });
+  }
+  if (isKitchen) {
+    businessMetrics.push({
+      label: "Orders Completed",
+      value: getLabeledValue(
+        "kitchen_orders_processed_total",
+        "status",
+        "completed",
+      ).toString(),
+      color: "var(--success)",
+    });
+    businessMetrics.push({
+      label: "Orders Failed",
+      value: getLabeledValue(
+        "kitchen_orders_processed_total",
+        "status",
+        "failed",
+      ).toString(),
+      color: "var(--danger)",
+    });
+  }
+  if (isNotification) {
+    businessMetrics.push({
+      label: "Notifications Sent",
+      value: getValue("notifications_sent_total").toString(),
+      color: "var(--accent)",
+    });
+    businessMetrics.push({
+      label: "WS Clients",
+      value: getValue("websocket_connected_clients").toString(),
+      color: "var(--primary)",
+    });
+  }
+
+  // Always add avg latency & throughput
+  businessMetrics.push({
+    label: "Avg Latency",
+    value: `${avgLatencyMs}ms`,
+    color:
+      parseFloat(avgLatencyMs) > 1000 ? "var(--danger)" : "var(--success)",
+  });
+  businessMetrics.push({
+    label: "Total Requests",
+    value: Math.round(httpCount).toString(),
+    color: "var(--text-primary)",
+  });
 
   return (
     <div className="metrics-section">
@@ -743,6 +887,47 @@ const ServiceMetricsViewer = ({
         </div>
       </div>
 
+      {/* Business Metrics */}
+      <h4
+        style={{
+          fontSize: "0.8rem",
+          textTransform: "uppercase",
+          letterSpacing: "0.08em",
+          color: "var(--primary)",
+          marginBottom: "1rem",
+          fontWeight: 600,
+        }}
+      >
+        Business Metrics
+      </h4>
+      <div className="key-metrics-grid" style={{ marginBottom: "2rem" }}>
+        {businessMetrics.map((m, i) => (
+          <div
+            className="metric-item"
+            key={i}
+            style={{ borderLeft: `3px solid ${m.color}` }}
+          >
+            <span className="label">{m.label}</span>
+            <div className="value" style={{ color: m.color }}>
+              {m.value}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Process Metrics */}
+      <h4
+        style={{
+          fontSize: "0.8rem",
+          textTransform: "uppercase",
+          letterSpacing: "0.08em",
+          color: "var(--text-secondary)",
+          marginBottom: "1rem",
+          fontWeight: 600,
+        }}
+      >
+        Process Metrics
+      </h4>
       <div className="key-metrics-grid">
         <div className="metric-item">
           <span className="label">Memory (RSS)</span>

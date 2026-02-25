@@ -92,15 +92,17 @@ services:
     restart: always
 
   # ============================================
-  # FRONTEND - React + Vite SPA
+  # FRONTEND - React + Vite SPA (Production Build)
   # ============================================
   frontend:
-    build: ./services/frontend
+    build:
+      context: ./services/frontend
+      dockerfile: Dockerfile.prod
+      args:
+        VITE_API_GATEWAY_URL: http://localhost:8080/api
+        VITE_NOTIFICATION_HUB_URL: http://localhost:3004
     ports:
-      - "5173:5173"
-    environment:
-      - VITE_API_GATEWAY_URL=http://localhost:8080/api
-      - VITE_NOTIFICATION_HUB_URL=http://localhost:3004
+      - "5173:80"
     depends_on:
       - order-gateway
 

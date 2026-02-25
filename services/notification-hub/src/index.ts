@@ -38,6 +38,22 @@ const connectedClients = new client.Gauge({
 });
 register.registerMetric(connectedClients);
 
+const httpRequestDurationMicroseconds = new client.Histogram({
+  name: "http_request_duration_seconds",
+  help: "Duration of HTTP requests in seconds",
+  labelNames: ["method", "route", "code"],
+  buckets: [0.1, 0.5, 1, 1.5, 2, 5],
+});
+register.registerMetric(httpRequestDurationMicroseconds);
+
+app.use((req, res, next) => {
+  const end = httpRequestDurationMicroseconds.startTimer();
+  res.on("finish", () => {
+    end({ method: req.method, route: req.path, code: res.statusCode });
+  });
+  next();
+});
+
 // ============================================
 // WebSocket Connection Handling
 // ============================================
@@ -93,11 +109,21 @@ app.post("/notify", (req: Request, res: Response) => {
 // Health Check
 // ============================================
 app.get("/health", (req: Request, res: Response) => {
-  res.status(200).json({
-    status: "UP",
-    service: "notification-hub",
-    connectedClients: io.engine.clientsCount,
-  });
+  const listening = httpServer.listening;
+  if (listening && !shuttingDown) {
+    res.status(200).json({
+      status: "UP",
+      service: "notification-hub",
+      connectedClients: io.engine.clientsCount,
+      websocket: "ACTIVE",
+    });
+  } else {
+    res.status(503).json({
+      status: "DOWN",
+      service: "notification-hub",
+      websocket: shuttingDown ? "SHUTTING_DOWN" : "INACTIVE",
+    });
+  }
 });
 
 // ============================================
@@ -111,9 +137,13 @@ app.get("/metrics", async (req: Request, res: Response) => {
 // ============================================
 // Admin: Shutdown (for Chaos Toggle)
 // ============================================
+let shuttingDown = false;
+
 app.post("/admin/shutdown", (req: Request, res: Response) => {
+  shuttingDown = true;
   res.json({ message: "Notification hub shutting down..." });
-  setTimeout(() => process.exit(1), 500);
+  // Delay exit so health checks detect DOWN before Docker restarts us
+  setTimeout(() => process.exit(1), 8000);
 });
 
 httpServer.listen(PORT, () => {
