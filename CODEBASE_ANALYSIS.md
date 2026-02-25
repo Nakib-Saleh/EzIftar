@@ -46,12 +46,13 @@ Order Gateway (:8080)  ←──────── JWT validation + Redis cache 
 | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | `POST /api/auth` (proxy)         | Proxied to identity-provider via `http-proxy-middleware` v2. Fixed: `onProxyReq` re-serializes body after `express.json()` consumes it |
 | `GET /api/stock/items`           | Passes through to stock-service                                                                                                        |
-| `POST /api/orders`               | Full core flow: Redis cache check → stock deduction → RabbitMQ `kitchen_queue` → respond <2s                                           |
+| `POST /api/orders`               | Full core flow: emit PENDING via notification hub → Redis cache check → stock deduction → RabbitMQ `kitchen_queue` → respond <2s        |
 | `GET /api/orders`                | Fetches orders by studentId from kitchen-service                                                                                       |
 | `POST /api/admin/chaos/:service` | Sends `/admin/shutdown` to target service. Valid: stock-service, kitchen-service, notification-hub                                     |
 | `GET /api/health/:service`       | Polls health of gateway, identity, stock, kitchen, notification                                                                        |
 | `GET /api/metrics/:service`      | Fetches raw Prometheus data from each service — proxied to frontend                                                                    |
-| `GET /api/stats/gateway`         | Rolling 30s window avg latency in ms + request count                                                                                   |
+| `GET /api/stats/gateway`         | Rolling 30s window avg latency in ms (`averageLatencyMs`) + request count                                                              |
+| `GET /health` (aggregated)       | Deep health check — pings Redis, checks RabbitMQ channel, polls all 4 downstream services. Returns `200 UP` or `503 DEGRADED` with per-dependency status |
 | JWT Middleware                   | Verifies Bearer token locally (no round-trip to identity-provider)                                                                     |
 | Redis                            | Checks `stock:{itemId}` cache before calling stock-service. Short-circuits if `<= 0`                                                   |
 | RabbitMQ                         | Produces to `kitchen_queue` and `order_status_queue`                                                                                   |
@@ -100,9 +101,9 @@ Order Gateway (:8080)  ←──────── JWT validation + Redis cache 
 | Room-based routing     | Client emits `join(studentId)` → joins room `student:{studentId}` → receives personal `orderStatus` events |
 | Broadcast              | Every status change also emits `orderUpdate` to ALL clients (admin dashboard)                              |
 | `POST /notify`         | Called by kitchen-service. Emits to student room + all clients                                             |
-| `GET /health`          | Returns UP + current `connectedClients` count                                                              |
-| `GET /metrics`         | Prometheus — `notifications_sent_total{status}` counter + `websocket_connected_clients` gauge              |
-| `POST /admin/shutdown` | Chaos toggle                                                                                               |
+| `GET /health`          | Returns UP/DOWN based on `httpServer.listening` + `connectedClients` count + `websocket: ACTIVE/INACTIVE` |
+| `GET /metrics`         | Prometheus — `http_request_duration_seconds` histogram + `notifications_sent_total{status}` counter + `websocket_connected_clients` gauge |
+| `POST /admin/shutdown` | Chaos toggle — sets `shuttingDown` flag (health returns 503 immediately), then `process.exit(1)` after 3s  |
 
 ---
 
@@ -115,12 +116,12 @@ Order Gateway (:8080)  ←──────── JWT validation + Redis cache 
 | Dashboard          | Dropdown of live menu items with stock + price. One-click order placement                                   |
 | Live order tracker | Shows real-time status updates per order via WebSocket (`orderStatus` event)                                |
 | Latency display    | Per-request `performance.now()` latency with colour coding (<1000ms=green, >1000ms=red)                     |
-| Avg latency alert  | Polls `/api/stats/gateway` every 2s, shows ⚠️ HIGH LATENCY badge if avg > 1s                                |
+| Avg latency alert  | Polls `/api/stats/gateway` every 2s (reads `averageLatencyMs`, converts to seconds), shows ⚠️ HIGH LATENCY badge if avg > 1s |
 | Health panel       | Polls `/api/health/:service` every 5s for all 5 services                                                    |
-| Metrics page       | Fetches raw Prometheus data from all 5 services, parses and displays Memory/Heap/CPU/Handles/Event Loop Lag |
+| Metrics page       | **Business Metrics** section per service (orders accepted/failed, login success/failed, deductions, notifications sent, WS clients, avg latency, total requests) + **Process Metrics** (Memory/Heap/CPU/Handles/Event Loop Lag). Uses regex that sums across all Prometheus label combinations |
 | Admin page         | Chaos Toggle buttons for all 3 killable services + chaos log                                                |
 | Grafana link       | "Grafana ↗" nav button → `localhost:3005/dashboards`                                                        |
-| Prod Dockerfile    | Separate `Dockerfile.prod` with multi-stage build: Node:18 builds → nginx:alpine serves `/dist`             |
+| Prod Dockerfile    | `Dockerfile.prod` — multi-stage build: Node:18 builds with `VITE_*` build args → nginx:alpine serves `/dist` with SPA fallback |
 | Dev Dockerfile     | Bun-based dev server inside Docker (`vite --host`)                                                          |
 
 ---
@@ -136,7 +137,7 @@ Order Gateway (:8080)  ←──────── JWT validation + Redis cache 
 | stock-service     | `oven/bun` built        | 3002         |
 | kitchen-service   | `oven/bun` built        | 3003         |
 | notification-hub  | `oven/bun` built        | 3004         |
-| frontend          | `oven/bun` built dev    | 5173         |
+| frontend          | nginx:alpine (prod build) | 5173→80    |
 | identity-db       | `postgres:14-alpine`    | 5433         |
 | stock-db          | `postgres:14-alpine`    | 5434         |
 | kitchen-db        | `postgres:14-alpine`    | 5435         |
@@ -222,7 +223,7 @@ All app services have `restart: always`. Databases use named volumes for persist
 | ------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------- |
 | ~~**Secrets in plaintext** — JWT secret and DB passwords hardcoded in `docker-compose.yml` and k8s YAML~~                                        | ✅ **FIXED** — see details below                |
 | ~~**No real test suite** — CI only checks build, no unit or integration tests~~                                                                  | ✅ **FIXED** — see details below                |
-| **Frontend runs in dev mode in Docker** — `Dockerfile` runs Vite dev server; `Dockerfile.prod` exists but is not wired into `docker-compose.yml` | Should swap to `Dockerfile.prod` for production |
+| ~~**Frontend runs in dev mode in Docker** — `Dockerfile` runs Vite dev server; `Dockerfile.prod` exists but is not wired into `docker-compose.yml`~~ | ✅ **FIXED** — see details below |
 | **No order history page** — `GET /api/orders` endpoint exists but frontend has no view listing past orders                                       |                                                 |
 | **Quantity always 1** — frontend hardcodes `quantity: 1` in order payload                                                                        |                                                 |
 | **Stock endpoint is unauthenticated** — `GET /api/stock/items` requires no JWT                                                                   | Depends on requirements                         |
@@ -271,3 +272,81 @@ All app services have `restart: always`. Databases use named volumes for persist
 | **Total**         | **5 files**         | **70 tests** | All pass (verified in Docker with `oven/bun:latest`)                                                                                                                                                            |
 
 **CI/CD updated:** Added `bun test` step after each service's build step in `.github/workflows/ci.yml`. Tests run as part of the `build-and-test` job and will fail the pipeline if any test breaks.
+
+---
+
+### Gap Fix 3: Observability & Metrics UI (was "Metrics page only shows process stats")
+
+**Problem:** The frontend Metrics page only displayed process-level metrics (Memory, Heap, CPU, Event Loop Lag). Business-critical metrics like orders processed, failure counts, and avg latency were missing — even though every service exposed them via Prometheus.
+
+**Solution implemented:**
+
+| Change | Files |
+|---|---|
+| Added `getLabeledValue()` helper to parse Prometheus metrics with labels (e.g. `orders_total{status="accepted"}`) | `services/frontend/src/App.tsx` |
+| Enhanced `getValue()` to sum across all labeled instances of a metric (needed for histogram `_sum`/`_count` which have per-route labels) | `services/frontend/src/App.tsx` |
+| Added **Business Metrics** section to `ServiceMetricsViewer` component, rendered above Process Metrics with color-coded left borders | `services/frontend/src/App.tsx` |
+| Business metrics shown per service: Gateway (Orders Accepted, Orders Failed), Identity (Login Success, Login Failed), Stock (Deductions OK, Deductions Failed), Kitchen (Orders Completed, Orders Failed), Notification (Notifications Sent, WS Clients). All services also show Avg Latency + Total Requests | `services/frontend/src/App.tsx` |
+
+---
+
+### Gap Fix 4: Frontend Latency Alert Bug (was "avgLatency always undefined")
+
+**Problem:** `fetchStats` read `res.data.averageLatency` but the gateway endpoint returns `averageLatencyMs`. Result: `avgLatency` was always `undefined`, the HIGH LATENCY alert never triggered.
+
+**Solution:** Changed to `res.data.averageLatencyMs / 1000` so the value is correctly in seconds and the `> 1` threshold works.
+
+**File:** `services/frontend/src/App.tsx`
+
+---
+
+### Gap Fix 5: PENDING Status in Order Lifecycle
+
+**Problem:** The requirement specifies a 4-step lifecycle: `Pending → Stock Verified → In Kitchen → Ready`. But `PENDING` was never emitted — the first status the user saw was `STOCK_VERIFIED`.
+
+**Solution:** In the gateway's `POST /api/orders` handler, the `orderId` is now generated early (before cache check), and a fire-and-forget `POST /notify` is sent to the Notification Hub with status `PENDING` before any stock logic runs. This means the WebSocket delivers `PENDING` to the frontend while the gateway is still processing.
+
+**File:** `services/order-gateway/src/index.ts`
+
+---
+
+### Gap Fix 6: Gateway `/health` Aggregated Dependency Check
+
+**Problem:** `GET /health` always returned `200 UP` regardless of whether Redis, RabbitMQ, or downstream services were reachable. The requirement says return `503` if a dependency is down.
+
+**Solution:** Replaced the static response with an aggregated check that:
+- Pings Redis (`PING`)
+- Checks RabbitMQ channel existence
+- Polls `/health` on all 4 downstream services (identity-provider, stock-service, kitchen-service, notification-hub) with 2s timeout
+- Returns `200 {"status": "UP"}` if all pass, or `503 {"status": "DEGRADED", "dependencies": {...}}` with per-dep UP/DOWN
+
+**File:** `services/order-gateway/src/index.ts`
+
+---
+
+### Gap Fix 7: Notification Hub Health + Metrics
+
+**Problem:** (a) The `/health` endpoint always returned `200 UP` without checking if the WebSocket server was actually listening. (b) The service was missing the `http_request_duration_seconds` histogram that all other services had, so Avg Latency and Total Requests showed `0` on the Metrics page.
+
+**Solution:**
+- `/health` now checks `httpServer.listening` — returns `503 DOWN` with `websocket: "INACTIVE"` if the server isn't ready
+- Added `http_request_duration_seconds` Histogram + timing middleware (matching the pattern used by all other services)
+- Added `shuttingDown` flag to `/admin/shutdown` — health returns `503` immediately while the process delays exit by 3s, giving the frontend time to detect DOWN state
+
+**File:** `services/notification-hub/src/index.ts`
+
+---
+
+### Gap Fix 8: Frontend Production Docker Build
+
+**Problem:** `docker-compose.yml` used the dev `Dockerfile` which ran `bun run dev` (Vite HMR server). The production `Dockerfile.prod` existed but wasn't wired in.
+
+**Solution:**
+
+| Change | Files |
+|---|---|
+| Updated `docker-compose.yml` frontend service to use `Dockerfile.prod` with build args for `VITE_API_GATEWAY_URL` and `VITE_NOTIFICATION_HUB_URL` | `docker-compose.yml` |
+| Port mapping changed from `5173:5173` to `5173:80` (nginx serves on port 80) | `docker-compose.yml` |
+| Enhanced `Dockerfile.prod` to accept `ARG` for Vite env vars (baked in at build time) and added nginx SPA fallback (`try_files $uri $uri/ /index.html`) | `services/frontend/Dockerfile.prod` |
+
+Frontend now served as static files via nginx:alpine instead of a Vite dev server.
