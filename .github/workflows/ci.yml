@@ -187,22 +187,63 @@ jobs:
         working-directory: ./services/frontend
         run: bun run build
 
-      # Integration Tests (against CI service containers)
+      # Integration Tests (against live service processes)
       - name: Install integration test dependencies
         working-directory: ./tests/integration
         run: bun install
 
       - name: Start services for integration tests
-        env:
-          DATABASE_URL: postgresql://postgres:postgres@localhost:5433/identity_db?schema=public
-          STOCK_DATABASE_URL: postgresql://postgres:postgres@localhost:5434/stock_db?schema=public
-          KITCHEN_DATABASE_URL: postgresql://postgres:postgres@localhost:5435/kitchen_db?schema=public
-          REDIS_URL: redis://localhost:6379
-          RABBITMQ_URL: amqp://guest:guest@localhost:5672
-          JWT_SECRET: ci-test-secret
         run: |
-          echo "Services are running via GitHub Actions service containers"
-          echo "Integration tests will run against localhost endpoints"
+          # identity-provider (port 3000)
+          DATABASE_URL="postgresql://postgres:postgres@localhost:5433/identity_db?schema=public" \
+          JWT_SECRET="ci-test-secret" \
+          PORT=3000 \
+          bun run ./services/identity-provider/dist/index.js &
+
+          # stock-service (port 3002)
+          DATABASE_URL="postgresql://postgres:postgres@localhost:5434/stock_db?schema=public" \
+          RABBITMQ_URL="amqp://guest:guest@localhost:5672" \
+          PORT=3002 \
+          bun run ./services/stock-service/dist/index.js &
+
+          # kitchen-service (port 3003)
+          DATABASE_URL="postgresql://postgres:postgres@localhost:5435/kitchen_db?schema=public" \
+          RABBITMQ_URL="amqp://guest:guest@localhost:5672" \
+          PORT=3003 \
+          bun run ./services/kitchen-service/dist/index.js &
+
+          # notification-hub (port 3004)
+          PORT=3004 \
+          bun run ./services/notification-hub/dist/index.js &
+
+          # order-gateway (port 8080)
+          IDENTITY_PROVIDER_URL="http://localhost:3000" \
+          STOCK_SERVICE_URL="http://localhost:3002" \
+          KITCHEN_SERVICE_URL="http://localhost:3003" \
+          NOTIFICATION_HUB_URL="http://localhost:3004" \
+          REDIS_URL="redis://localhost:6379" \
+          RABBITMQ_URL="amqp://guest:guest@localhost:5672" \
+          JWT_SECRET="ci-test-secret" \
+          PORT=8080 \
+          bun run ./services/order-gateway/dist/index.js &
+
+          echo "Waiting for all services to be ready..."
+          for port in 3000 3002 3003 3004 8080; do
+            for i in $(seq 1 30); do
+              if curl -sf http://localhost:$port/health > /dev/null 2>&1; then
+                echo "Port $port is ready"
+                break
+              fi
+              sleep 2
+            done
+          done
+
+      - name: Run integration tests
+        working-directory: ./tests/integration
+        env:
+          GATEWAY_URL: http://localhost:8080
+          STOCK_SERVICE_URL: http://localhost:3002
+        run: bun test --timeout 30000
 
   docker-build:
     runs-on: ubuntu-latest
