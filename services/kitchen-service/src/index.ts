@@ -56,7 +56,6 @@ async function connectToRabbit() {
       const connection = await amqp.connect(RABBITMQ_URL);
       channel = await connection.createChannel();
       await channel.assertQueue("kitchen_queue");
-      await channel.assertQueue("order_status_queue");
 
       console.log("Connected to RabbitMQ & listening on kitchen_queue");
 
@@ -64,6 +63,12 @@ async function connectToRabbit() {
       channel.consume("kitchen_queue", async (msg: any) => {
         if (msg !== null) {
           const data = JSON.parse(msg.content.toString());
+
+          if (shuttingDown) {
+            // NACK and requeue — don't process while in chaos mode
+            channel.nack(msg, false, true);
+            return;
+          }
           console.log("Received order in Kitchen:", data);
 
           try {
@@ -168,7 +173,11 @@ async function notifyStatusChange(
 // ============================================
 app.get("/health", async (req: Request, res: Response) => {
   if (shuttingDown) {
-    res.status(503).json({ status: "DOWN", service: "kitchen-service", reason: "SHUTTING_DOWN" });
+    res.status(503).json({
+      status: "DOWN",
+      service: "kitchen-service",
+      reason: "SHUTTING_DOWN",
+    });
     return;
   }
   try {
@@ -195,6 +204,10 @@ app.get("/metrics", async (req: Request, res: Response) => {
 // Get orders (by studentId or all)
 // ============================================
 app.get("/orders", async (req: Request, res: Response) => {
+  if (shuttingDown) {
+    res.status(503).json({ error: "Service is down (chaos mode)" });
+    return;
+  }
   const { studentId } = req.query;
 
   try {
@@ -234,8 +247,12 @@ let shuttingDown = false;
 
 app.post("/admin/shutdown", (req: Request, res: Response) => {
   shuttingDown = true;
-  res.json({ message: "Kitchen service shutting down..." });
-  setTimeout(() => process.exit(1), 8000);
+  res.json({ message: "Kitchen service entering degraded mode (chaos)" });
+});
+
+app.post("/admin/restore", (req: Request, res: Response) => {
+  shuttingDown = false;
+  res.json({ message: "Kitchen service restored" });
 });
 
 app.listen(PORT, async () => {

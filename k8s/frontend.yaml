@@ -19,6 +19,13 @@ spec:
           image: eziftar/frontend:latest
           ports:
             - containerPort: 5173
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
 ---
 apiVersion: v1
 kind: Service

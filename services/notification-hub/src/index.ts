@@ -77,6 +77,10 @@ io.on("connection", (socket) => {
 // Notification Endpoint (called by Kitchen Service)
 // ============================================
 app.post("/notify", (req: Request, res: Response) => {
+  if (shuttingDown) {
+    res.status(503).json({ error: "Service is down (chaos mode)" });
+    return;
+  }
   const { orderId, status, studentId, timestamp } = req.body;
 
   if (!orderId || !status) {
@@ -103,6 +107,50 @@ app.post("/notify", (req: Request, res: Response) => {
   console.log(`Notification sent: Order ${orderId} → ${status}`);
 
   res.status(200).json({ message: "Notification sent", notification });
+});
+
+// ============================================
+// Stock Update Broadcast (called by gateway after order)
+// ============================================
+app.post("/broadcast/stock", (req: Request, res: Response) => {
+  const { items } = req.body;
+  if (items) {
+    io.emit("stockUpdate", items);
+  }
+  res.status(200).json({ message: "Stock update broadcast sent" });
+});
+
+// ============================================
+// Health Update Broadcast (called by gateway periodically)
+// ============================================
+app.post("/broadcast/health", (req: Request, res: Response) => {
+  const healthData = req.body;
+  if (healthData) {
+    io.emit("healthUpdate", healthData);
+  }
+  res.status(200).json({ message: "Health update broadcast sent" });
+});
+
+// ============================================
+// Stats Update Broadcast (called by gateway periodically)
+// ============================================
+app.post("/broadcast/stats", (req: Request, res: Response) => {
+  const statsData = req.body;
+  if (statsData) {
+    io.emit("statsUpdate", statsData);
+  }
+  res.status(200).json({ message: "Stats update broadcast sent" });
+});
+
+// ============================================
+// Circuit Breaker State Broadcast (called by gateway on state change)
+// ============================================
+app.post("/broadcast/circuit-breaker", (req: Request, res: Response) => {
+  const cbData = req.body;
+  if (cbData) {
+    io.emit("circuitBreakerUpdate", cbData);
+  }
+  res.status(200).json({ message: "Circuit breaker update broadcast sent" });
 });
 
 // ============================================
@@ -141,9 +189,12 @@ let shuttingDown = false;
 
 app.post("/admin/shutdown", (req: Request, res: Response) => {
   shuttingDown = true;
-  res.json({ message: "Notification hub shutting down..." });
-  // Delay exit so health checks detect DOWN before Docker restarts us
-  setTimeout(() => process.exit(1), 8000);
+  res.json({ message: "Notification hub entering degraded mode (chaos)" });
+});
+
+app.post("/admin/restore", (req: Request, res: Response) => {
+  shuttingDown = false;
+  res.json({ message: "Notification hub restored" });
 });
 
 httpServer.listen(PORT, () => {

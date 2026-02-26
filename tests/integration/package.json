@@ -1,0 +1,13 @@
+{
+  "name": "eziftar-integration-tests",
+  "version": "1.0.0",
+  "description": "Integration tests for EzIftar microservices (requires running docker-compose stack)",
+  "scripts": {
+    "test": "bun test --timeout 30000"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3",
+    "@types/node": "^20.11.20",
+    "bun-types": "latest"
+  }
+}

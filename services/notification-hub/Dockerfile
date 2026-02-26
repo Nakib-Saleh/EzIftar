@@ -1,4 +1,4 @@
-FROM oven/bun:latest
+FROM oven/bun:latest AS builder
 
 WORKDIR /app
 
@@ -10,6 +10,18 @@ COPY . .
 
 RUN bun run build
 
+# Run on Node.js for proper WebSocket upgrade event support
+# (Bun's createServer doesn't emit 'upgrade' events needed by Socket.IO)
+FROM node:18-alpine
+
+WORKDIR /app
+
+COPY package.json ./
+
+RUN npm install --omit=dev
+
+COPY --from=builder /app/dist ./dist
+
 EXPOSE 3004
 
-CMD ["bun", "dist/index.js"]
+CMD ["node", "dist/index.js"]

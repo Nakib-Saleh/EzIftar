@@ -44,7 +44,6 @@ async function connectToRabbit() {
       const connection = await amqp.connect(RABBITMQ_URL);
       channel = await connection.createChannel();
       await channel.assertQueue("kitchen_queue");
-      await channel.assertQueue("order_status_queue");
       console.log("Connected to RabbitMQ (Gateway Producer)");
       break;
     } catch (e) {
@@ -83,6 +82,102 @@ const ordersFailedTotal = new client.Counter({
   help: "Total failed orders",
 });
 register.registerMetric(ordersFailedTotal);
+
+const cacheHitsTotal = new client.Counter({
+  name: "cache_hits_total",
+  help: "Total Redis cache hits for stock lookups",
+});
+register.registerMetric(cacheHitsTotal);
+
+const cacheMissesTotal = new client.Counter({
+  name: "cache_misses_total",
+  help: "Total Redis cache misses for stock lookups",
+});
+register.registerMetric(cacheMissesTotal);
+
+const circuitBreakerStateGauge = new client.Gauge({
+  name: "circuit_breaker_state",
+  help: "Circuit breaker state: 0=CLOSED, 1=HALF_OPEN, 2=OPEN",
+  labelNames: ["target"],
+});
+register.registerMetric(circuitBreakerStateGauge);
+
+// ============================================
+// Circuit Breaker (protects stock-service calls)
+// ============================================
+class CircuitBreaker {
+  private failures = 0;
+  private lastFailureTime = 0;
+  private state: "CLOSED" | "OPEN" | "HALF_OPEN" = "CLOSED";
+
+  constructor(
+    private readonly threshold: number = 5,
+    private readonly resetTimeout: number = 10000,
+  ) {}
+
+  async exec<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.state === "OPEN") {
+      if (Date.now() - this.lastFailureTime > this.resetTimeout) {
+        this.state = "HALF_OPEN";
+        this.updateMetric();
+      } else {
+        throw new Error("Circuit breaker is OPEN");
+      }
+    }
+    try {
+      const result = await fn();
+      this.onSuccess();
+      return result;
+    } catch (error) {
+      this.onFailure();
+      throw error;
+    }
+  }
+
+  private onSuccess() {
+    this.failures = 0;
+    this.state = "CLOSED";
+    this.updateMetric();
+  }
+
+  private onFailure() {
+    this.failures++;
+    this.lastFailureTime = Date.now();
+    if (this.failures >= this.threshold) {
+      this.state = "OPEN";
+      console.warn(`Circuit breaker OPENED after ${this.failures} failures`);
+    }
+    this.updateMetric();
+  }
+
+  private updateMetric() {
+    const val =
+      this.state === "CLOSED" ? 0 : this.state === "HALF_OPEN" ? 1 : 2;
+    circuitBreakerStateGauge.set({ target: "stock-service" }, val);
+
+    // Broadcast circuit breaker state change via WebSocket (fire-and-forget)
+    axios
+      .post(
+        `${NOTIFICATION_HUB_URL}/broadcast/circuit-breaker`,
+        { state: this.state, stateValue: val, target: "stock-service" },
+        { timeout: 1000 },
+      )
+      .catch(() => {});
+  }
+
+  getState() {
+    return this.state;
+  }
+
+  reset() {
+    this.failures = 0;
+    this.state = "CLOSED";
+    this.updateMetric();
+  }
+}
+
+// Open after 5 consecutive failures, retry after 10s
+const stockBreaker = new CircuitBreaker(5, 10000);
 
 app.use((req: Request, res: Response, next: NextFunction) => {
   const end = httpRequestDurationMicroseconds.startTimer();
@@ -178,6 +273,9 @@ app.get("/health", async (req: Request, res: Response) => {
   // Check RabbitMQ channel
   checks.rabbitmq = channel ? "UP" : "DOWN";
   if (!channel) allUp = false;
+
+  // Circuit breaker state
+  checks["stock-circuit-breaker"] = stockBreaker.getState();
 
   // Check downstream services
   const downstreamServices: [string, string][] = [
@@ -357,6 +455,20 @@ app.post("/api/orders", jwtMiddleware, async (req: Request, res: Response) => {
     return;
   }
 
+  // Gateway-level Idempotency Key: prevents duplicate orders on client retry
+  const idempotencyKey = req.headers["idempotency-key"] as string | undefined;
+  if (idempotencyKey && redis) {
+    try {
+      const cached = await redis.get(`idempotency:${idempotencyKey}`);
+      if (cached) {
+        res.status(200).json(JSON.parse(cached));
+        return;
+      }
+    } catch (e) {
+      console.error("Idempotency check failed:", e);
+    }
+  }
+
   try {
     // Generate orderId early so we can emit PENDING status
     const orderId = `order-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
@@ -375,26 +487,35 @@ app.post("/api/orders", jwtMiddleware, async (req: Request, res: Response) => {
       )
       .catch(() => {});
 
-    // Step 1: Check Redis cache for stock availability
+    // Step 1: Check Redis cache for stock availability (with hit/miss metrics)
     if (redis) {
       try {
         const cachedStock = await redis.get(`stock:${itemId}`);
-        if (cachedStock !== null && parseInt(cachedStock) <= 0) {
-          ordersFailedTotal.inc();
-          res.status(400).json({ error: "Item out of stock (cached)", itemId });
-          return;
+        if (cachedStock !== null) {
+          cacheHitsTotal.inc();
+          if (parseInt(cachedStock) <= 0) {
+            ordersFailedTotal.inc();
+            res
+              .status(400)
+              .json({ error: "Item out of stock (cached)", itemId });
+            return;
+          }
+        } else {
+          cacheMissesTotal.inc();
         }
       } catch (e) {
         console.error("Redis cache check failed, proceeding to DB:", e);
+        cacheMissesTotal.inc();
       }
     }
 
-    // Step 2: Call Stock Service to deduct inventory (with timeout)
-
-    const stockResponse = await axios.post(
-      `${STOCK_SERVICE_URL}/stock/deduct`,
-      { itemId, quantity, orderId },
-      { timeout: 2000 },
+    // Step 2: Call Stock Service via Circuit Breaker (with timeout)
+    const stockResponse = await stockBreaker.exec(() =>
+      axios.post(
+        `${STOCK_SERVICE_URL}/stock/deduct`,
+        { itemId, quantity, orderId },
+        { timeout: 2000 },
+      ),
     );
 
     if (stockResponse.status !== 200) {
@@ -415,21 +536,56 @@ app.post("/api/orders", jwtMiddleware, async (req: Request, res: Response) => {
     }
 
     ordersTotal.inc({ status: "accepted" });
-
+    // Broadcast updated stock via WebSocket (fire-and-forget)
+    axios
+      .get(`${STOCK_SERVICE_URL}/items`)
+      .then((stockRes) => {
+        axios
+          .post(
+            `${NOTIFICATION_HUB_URL}/broadcast/stock`,
+            { items: stockRes.data },
+            { timeout: 1000 },
+          )
+          .catch(() => {});
+      })
+      .catch(() => {});
     // Step 4: Respond immediately (<2s requirement)
-    res.status(200).json({
+    const responseBody = {
       message: "Order accepted! Stock verified. Sent to kitchen.",
       orderId,
       status: "STOCK_VERIFIED",
       itemId,
       quantity,
       studentId: user.studentId,
-    });
+    };
+
+    // Cache response for idempotency (TTL 5 minutes)
+    if (idempotencyKey && redis) {
+      redis
+        .set(
+          `idempotency:${idempotencyKey}`,
+          JSON.stringify(responseBody),
+          "EX",
+          300,
+        )
+        .catch(() => {});
+    }
+
+    res.status(200).json(responseBody);
   } catch (error: any) {
     console.error("Order placement failed:", error.message);
     ordersFailedTotal.inc();
 
-    if (error.code === "ECONNABORTED" || error.message?.includes("timeout")) {
+    if (error.message === "Circuit breaker is OPEN") {
+      res.status(503).json({
+        error:
+          "Stock service temporarily unavailable (circuit breaker open). Retrying in a few seconds.",
+        status: "CIRCUIT_OPEN",
+      });
+    } else if (
+      error.code === "ECONNABORTED" ||
+      error.message?.includes("timeout")
+    ) {
       res.status(503).json({
         error: "Stock service timeout. Please retry.",
         status: "TIMEOUT",
@@ -505,7 +661,114 @@ app.post(
   },
 );
 
+// ============================================
+// Admin: Restart a service (restore from chaos)
+// ============================================
+app.post(
+  "/api/admin/restart/:service",
+  jwtMiddleware,
+  async (req: Request, res: Response) => {
+    const { service } = req.params;
+    const validServices = [
+      "stock-service",
+      "kitchen-service",
+      "notification-hub",
+    ];
+
+    if (!validServices.includes(service)) {
+      res.status(400).json({ error: "Invalid service name" });
+      return;
+    }
+
+    let targetUrl = "";
+    switch (service) {
+      case "stock-service":
+        targetUrl = STOCK_SERVICE_URL;
+        break;
+      case "kitchen-service":
+        targetUrl = KITCHEN_SERVICE_URL;
+        break;
+      case "notification-hub":
+        targetUrl = NOTIFICATION_HUB_URL;
+        break;
+    }
+
+    try {
+      await axios.post(`${targetUrl}/admin/restore`, {}, { timeout: 2000 });
+      res.json({ message: `${service} restored` });
+    } catch (error: any) {
+      res.status(500).json({
+        error: `Failed to restore ${service}: ${error.message}`,
+      });
+    }
+  },
+);
+
 app.listen(PORT, async () => {
   console.log(`Order Gateway running on port ${PORT}`);
+
   await connectToRabbit();
+
+  // Periodic health broadcast via WebSocket (every 10s)
+  setInterval(async () => {
+    try {
+      const healthData: Record<string, string> = {};
+      healthData.gateway = "UP";
+
+      // Check downstream services
+      const services: [string, string][] = [
+        ["identity", IDENTITY_PROVIDER_URL],
+        ["stock", STOCK_SERVICE_URL],
+        ["kitchen", KITCHEN_SERVICE_URL],
+        ["notification", NOTIFICATION_HUB_URL],
+      ];
+
+      await Promise.all(
+        services.map(async ([name, url]) => {
+          try {
+            await axios.get(`${url}/health`, { timeout: 2000 });
+            healthData[name] = "UP";
+          } catch {
+            healthData[name] = "DOWN";
+          }
+        }),
+      );
+
+      // Broadcast health to all frontend clients via notification hub
+      axios
+        .post(`${NOTIFICATION_HUB_URL}/broadcast/health`, healthData, {
+          timeout: 1000,
+        })
+        .catch(() => {});
+    } catch {
+      // Silent failure — health broadcast is best-effort
+    }
+  }, 10000);
+
+  // Periodic stats broadcast via WebSocket (every 10s)
+  setInterval(() => {
+    const now = Date.now();
+    const validDurations = requestDurations.filter(
+      (r) => now - r.time <= WINDOW_SIZE_MS,
+    );
+    const count = validDurations.length;
+    const totalDuration = validDurations.reduce(
+      (sum, r) => sum + r.duration,
+      0,
+    );
+    const averageSec = count > 0 ? totalDuration / count : 0;
+    const averageMs = Math.max(0, averageSec * 1000);
+
+    const statsData = {
+      averageLatencyMs: parseFloat(averageMs.toFixed(3)),
+      requestCount: count,
+      circuitBreaker: stockBreaker.getState(),
+    };
+
+    axios
+      .post(`${NOTIFICATION_HUB_URL}/broadcast/stats`, statsData, {
+        timeout: 1000,
+      })
+      .catch(() => {});
+  }, 10000);
 });

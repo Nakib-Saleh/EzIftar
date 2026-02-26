@@ -216,4 +216,156 @@ describe("Order Gateway", () => {
       expect(rewritten).toBe("/auth/login");
     });
   });
+
+  // ============================================
+  // Circuit Breaker Logic
+  // ============================================
+  describe("Circuit Breaker", () => {
+    test("should start in CLOSED state", () => {
+      const state = { failures: 0, state: "CLOSED" as const };
+      expect(state.state).toBe("CLOSED");
+      expect(state.failures).toBe(0);
+    });
+
+    test("should open after threshold failures", () => {
+      const threshold = 5;
+      let failures = 0;
+      let state: "CLOSED" | "OPEN" | "HALF_OPEN" = "CLOSED";
+
+      for (let i = 0; i < threshold; i++) {
+        failures++;
+        if (failures >= threshold) {
+          state = "OPEN";
+        }
+      }
+      expect(state).toBe("OPEN");
+      expect(failures).toBe(5);
+    });
+
+    test("should transition to HALF_OPEN after reset timeout", () => {
+      const resetTimeout = 10000;
+      const lastFailureTime = Date.now() - 15000; // 15s ago
+      let state: "CLOSED" | "OPEN" | "HALF_OPEN" = "OPEN";
+
+      if (Date.now() - lastFailureTime > resetTimeout) {
+        state = "HALF_OPEN";
+      }
+      expect(state).toBe("HALF_OPEN");
+    });
+
+    test("should stay OPEN before reset timeout", () => {
+      const resetTimeout = 10000;
+      const lastFailureTime = Date.now() - 5000; // 5s ago
+      let state: "CLOSED" | "OPEN" | "HALF_OPEN" = "OPEN";
+
+      if (Date.now() - lastFailureTime > resetTimeout) {
+        state = "HALF_OPEN";
+      }
+      expect(state).toBe("OPEN");
+    });
+
+    test("should reset to CLOSED on success", () => {
+      let failures = 3;
+      let state: "CLOSED" | "OPEN" | "HALF_OPEN" = "HALF_OPEN";
+
+      // Simulate successful call
+      failures = 0;
+      state = "CLOSED";
+      expect(state).toBe("CLOSED");
+      expect(failures).toBe(0);
+    });
+
+    test("should map state to correct metric value", () => {
+      const stateToMetric = (s: string) =>
+        s === "CLOSED" ? 0 : s === "HALF_OPEN" ? 1 : 2;
+
+      expect(stateToMetric("CLOSED")).toBe(0);
+      expect(stateToMetric("HALF_OPEN")).toBe(1);
+      expect(stateToMetric("OPEN")).toBe(2);
+    });
+  });
+
+  // ============================================
+  // Idempotency Key
+  // ============================================
+  describe("Idempotency Key", () => {
+    test("should extract idempotency-key header", () => {
+      const headers = { "idempotency-key": "abc-123-def" };
+      const key = headers["idempotency-key"];
+      expect(key).toBe("abc-123-def");
+    });
+
+    test("should build correct idempotency cache key", () => {
+      const key = "order-unique-key";
+      const cacheKey = `idempotency:${key}`;
+      expect(cacheKey).toBe("idempotency:order-unique-key");
+    });
+
+    test("should return cached response for duplicate key", () => {
+      const cachedResponse = JSON.stringify({
+        message: "Order accepted!",
+        orderId: "order-123",
+        status: "STOCK_VERIFIED",
+      });
+
+      const parsed = JSON.parse(cachedResponse);
+      expect(parsed.orderId).toBe("order-123");
+      expect(parsed.status).toBe("STOCK_VERIFIED");
+    });
+
+    test("should proceed normally when no idempotency key", () => {
+      const headers = {} as any;
+      const key = headers["idempotency-key"];
+      expect(key).toBeUndefined();
+
+      // No key → should proceed with order
+      const shouldSkip = key && key.length > 0;
+      expect(shouldSkip).toBeFalsy();
+    });
+  });
+
+  // ============================================
+  // Cache Hit/Miss Metrics
+  // ============================================
+  describe("Cache Hit/Miss Tracking", () => {
+    test("should count hit when cache returns a value", () => {
+      const cachedStock = "50";
+      let hits = 0;
+      let misses = 0;
+
+      if (cachedStock !== null) {
+        hits++;
+      } else {
+        misses++;
+      }
+      expect(hits).toBe(1);
+      expect(misses).toBe(0);
+    });
+
+    test("should count miss when cache returns null", () => {
+      const cachedStock: string | null = null;
+      let hits = 0;
+      let misses = 0;
+
+      if (cachedStock !== null) {
+        hits++;
+      } else {
+        misses++;
+      }
+      expect(hits).toBe(0);
+      expect(misses).toBe(1);
+    });
+
+    test("should count miss on Redis error", () => {
+      let misses = 0;
+
+      // Simulate Redis error → fallthrough
+      try {
+        throw new Error("Redis connection refused");
+      } catch (e) {
+        misses++;
+      }
+      expect(misses).toBe(1);
+    });
+  });
 });

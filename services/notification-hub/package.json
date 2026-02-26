@@ -1,10 +1,11 @@
 {
   "name": "notification-hub",
   "version": "1.0.0",
+  "type": "module",
   "description": "Notification Hub - Real-Time WebSocket (Socket.IO) Status Updates",
   "main": "dist/index.js",
   "scripts": {
-    "start": "bun dist/index.js",
+    "start": "node dist/index.js",
     "dev": "bun --watch src/index.ts",
     "build": "bun build ./src/index.ts --outdir ./dist --target node",
     "test": "bun test"

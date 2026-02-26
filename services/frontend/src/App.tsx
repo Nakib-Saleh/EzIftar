@@ -5,8 +5,9 @@ import "./index.css";
 
 const API_GATEWAY_URL =
   import.meta.env.VITE_API_GATEWAY_URL || "http://localhost:8080/api";
-const NOTIFICATION_HUB_URL =
-  import.meta.env.VITE_NOTIFICATION_HUB_URL || "http://localhost:3004";
+// WebSocket connects through nginx (same origin) which reverse-proxies to notification-hub
+// nginx handles the HTTP 101 WebSocket upgrade natively — true WebSocket, not polling
+const WS_URL = window.location.origin;
 
 interface MenuItem {
   id: string;
@@ -42,10 +43,12 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [items, setItems] = useState<MenuItem[]>([]);
   const [selectedItem, setSelectedItem] = useState<string>("");
+  const [quantity, setQuantity] = useState<number>(1);
   const [logs, setLogs] = useState<string[]>([]);
   const [latency, setLatency] = useState<number | null>(null);
   const [avgLatency, setAvgLatency] = useState<number>(0);
   const [orderStatuses, setOrderStatuses] = useState<OrderStatus[]>([]);
+  const [orderHistory, setOrderHistory] = useState<any[]>([]);
 
   // Health State
   const [health, setHealth] = useState<Record<string, string>>({
@@ -58,6 +61,7 @@ function App() {
 
   // WebSocket
   const [socket, setSocket] = useState<Socket | null>(null);
+  const [wsConnected, setWsConnected] = useState(false);
 
   const addLog = (msg: string) =>
     setLogs((prev) => [`[${new Date().toLocaleTimeString()}] ${msg}`, ...prev]);
@@ -85,15 +89,17 @@ function App() {
   const handleRegister = async () => {
     setAuthError("");
     try {
-      await axios.post(`${API_GATEWAY_URL}/auth/register`, {
+      const res = await axios.post(`${API_GATEWAY_URL}/auth/register`, {
         studentId: registerStudentId,
         name: registerName,
         password: registerPassword,
       });
-      setAuthError("");
-      setIsRegistering(false);
-      setLoginStudentId(registerStudentId);
-      addLog("Registration successful! Please login.");
+      const { token: jwt, student: userData } = res.data;
+      localStorage.setItem("eziftar_token", jwt);
+      setToken(jwt);
+      setUser(userData);
+      setView("dashboard");
+      addLog("Registration successful! Logged in automatically.");
     } catch (error: any) {
       setAuthError(error.response?.data?.error || "Registration failed");
     }
@@ -126,12 +132,31 @@ function App() {
   useEffect(() => {
     if (!token || !user) return;
 
-    const newSocket = io(NOTIFICATION_HUB_URL);
+    const newSocket = io(WS_URL, {
+      transports: ["websocket"],
+      reconnectionAttempts: Infinity,
+      reconnectionDelay: 2000,
+      reconnectionDelayMax: 10000,
+    });
     setSocket(newSocket);
 
     newSocket.on("connect", () => {
       console.log("WebSocket connected");
       newSocket.emit("join", user.studentId);
+      setWsConnected(true);
+      addLog("🟢 WebSocket connected — real-time updates active");
+    });
+
+    newSocket.on("disconnect", (reason) => {
+      console.warn("WebSocket disconnected:", reason);
+      setWsConnected(false);
+      addLog(`🔴 WebSocket disconnected (${reason}) — switching to polling`);
+      // Immediately re-check health so the UI reflects the change right away
+      checkHealth();
+    });
+
+    newSocket.on("connect_error", () => {
+      setWsConnected(false);
     });
 
     newSocket.on("orderStatus", (data: OrderStatus) => {
@@ -147,6 +172,36 @@ function App() {
         }
         return [data, ...prev];
       });
+    });
+
+    // Listen for real-time stock & health updates from WebSocket
+    newSocket.on("stockUpdate", (data: any) => {
+      if (Array.isArray(data)) {
+        setItems(data);
+      }
+    });
+
+    newSocket.on("healthUpdate", (data: Record<string, string>) => {
+      setHealth((prev) => ({ ...prev, ...data }));
+    });
+
+    // Real-time stats updates from gateway (avg latency, request count)
+    newSocket.on("statsUpdate", (data: any) => {
+      if (data.averageLatencyMs !== undefined) {
+        setAvgLatency(data.averageLatencyMs / 1000);
+      }
+    });
+
+    // Real-time circuit breaker state changes
+    newSocket.on("circuitBreakerUpdate", (data: any) => {
+      if (data.state) {
+        addLog(`⚡ Circuit Breaker → ${data.state}`);
+      }
+    });
+
+    // Broadcast order updates refresh order history automatically
+    newSocket.on("orderUpdate", () => {
+      fetchOrders();
     });
 
     return () => {
@@ -201,30 +256,77 @@ function App() {
     [selectedItem],
   );
 
-  // Polling
+  const fetchOrders = useCallback(async () => {
+    if (!token) return;
+    try {
+      const res = await axios.get(`${API_GATEWAY_URL}/orders`, authHeaders);
+      setOrderHistory(res.data);
+    } catch {
+      console.error("Failed to fetch order history");
+    }
+  }, [token]);
+
+  // Reconcile live orderStatuses from orderHistory (DB ground truth)
+  // If a WebSocket event was lost (e.g. notification-hub was down), this catches up
+  useEffect(() => {
+    if (orderHistory.length === 0) return;
+    const statusOrder = [
+      "PENDING",
+      "STOCK_VERIFIED",
+      "IN_KITCHEN",
+      "READY",
+      "FAILED",
+    ];
+    setOrderStatuses((prev) => {
+      let updated = [...prev];
+      let changed = false;
+      for (const order of orderHistory) {
+        const idx = updated.findIndex((o) => o.orderId === order.orderId);
+        if (idx >= 0) {
+          const currentLevel = statusOrder.indexOf(updated[idx].status);
+          const historyLevel = statusOrder.indexOf(order.status);
+          if (historyLevel > currentLevel) {
+            updated[idx] = {
+              orderId: order.orderId,
+              status: order.status,
+              timestamp: order.updatedAt || order.createdAt,
+            };
+            changed = true;
+          }
+        }
+      }
+      return changed ? updated : prev;
+    });
+  }, [orderHistory]);
+
+  // Initial data fetch on view change
   useEffect(() => {
     if (view === "login") return;
-
     const init = async () => {
       await checkHealth();
       await fetchItems(true);
       fetchStats();
+      fetchOrders();
     };
     init();
+  }, [view]);
 
-    const interval = setInterval(() => {
+  // Polling: only when WebSocket is disconnected (5s recovery mode)
+  // When connected, all updates arrive via WebSocket — no polling needed
+  useEffect(() => {
+    if (view === "login" || wsConnected) return;
+
+    const recoveryInterval = setInterval(() => {
       checkHealth();
       fetchItems(false);
       fetchStats();
+      fetchOrders();
     }, 5000);
 
-    const statsInterval = setInterval(fetchStats, 2000);
-
     return () => {
-      clearInterval(interval);
-      clearInterval(statsInterval);
+      clearInterval(recoveryInterval);
     };
-  }, [view]);
+  }, [view, wsConnected]);
 
   // ============================================
   // Order Placement
@@ -240,7 +342,7 @@ function App() {
         `${API_GATEWAY_URL}/orders`,
         {
           itemId: selectedItem,
-          quantity: 1,
+          quantity,
         },
         authHeaders,
       );
@@ -251,16 +353,23 @@ function App() {
         `✅ Order Accepted! Duration: ${dur}ms | Status: ${res.data.status}`,
       );
 
-      setOrderStatuses((prev) => [
-        {
+      setOrderStatuses((prev) => {
+        const existing = prev.findIndex((o) => o.orderId === res.data.orderId);
+        const entry = {
           orderId: res.data.orderId,
           status: res.data.status,
           timestamp: new Date().toISOString(),
-        },
-        ...prev,
-      ]);
+        };
+        if (existing >= 0) {
+          const updated = [...prev];
+          updated[existing] = entry;
+          return updated;
+        }
+        return [entry, ...prev];
+      });
 
       fetchItems();
+      fetchOrders();
     } catch (error: any) {
       const dur = Math.round(performance.now() - start);
       setLatency(dur);
@@ -281,11 +390,28 @@ function App() {
         {},
         authHeaders,
       );
-      addLog(`💀 Chaos triggered on ${service}`);
+      addLog(`💀 Chaos triggered on ${service} — service killed`);
       setTimeout(checkHealth, 2000);
     } catch (error: any) {
       addLog(`💀 Chaos signal sent to ${service} (may already be down)`);
       setTimeout(checkHealth, 2000);
+    }
+  };
+
+  const restartService = async (service: string) => {
+    addLog(`🔄 Restarting ${service}...`);
+    try {
+      await axios.post(
+        `${API_GATEWAY_URL}/admin/restart/${service}`,
+        {},
+        authHeaders,
+      );
+      addLog(`✅ Restart signal sent to ${service}`);
+      setTimeout(checkHealth, 5000);
+    } catch (error: any) {
+      addLog(
+        `⚠️ Restart failed for ${service}: ${error.response?.data?.error || error.message}`,
+      );
     }
   };
 
@@ -400,6 +526,15 @@ function App() {
             Metrics
           </button>
           <button
+            className={`nav-btn ${view === "orders" ? "active" : ""}`}
+            onClick={() => {
+              setView("orders");
+              fetchOrders();
+            }}
+          >
+            Orders
+          </button>
+          <button
             className={`nav-btn ${view === "admin" ? "active" : ""}`}
             onClick={() => setView("admin")}
           >
@@ -486,6 +621,69 @@ function App() {
               </select>
             </div>
 
+            <div style={{ marginBottom: "2rem" }}>
+              <label
+                style={{
+                  display: "block",
+                  marginBottom: "0.8rem",
+                  color: "#a1a1aa",
+                  fontSize: "0.9rem",
+                }}
+              >
+                Quantity
+              </label>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "0.75rem",
+                  justifyContent: "center",
+                }}
+              >
+                <button
+                  className="btn-primary"
+                  style={{
+                    width: "40px",
+                    height: "40px",
+                    padding: 0,
+                    fontSize: "1.2rem",
+                  }}
+                  onClick={() => setQuantity((q) => Math.max(1, q - 1))}
+                  disabled={quantity <= 1}
+                >
+                  −
+                </button>
+                <input
+                  type="number"
+                  min="1"
+                  max="50"
+                  value={quantity}
+                  onChange={(e) =>
+                    setQuantity(
+                      Math.max(1, Math.min(50, parseInt(e.target.value) || 1)),
+                    )
+                  }
+                  style={{
+                    width: "60px",
+                    textAlign: "center",
+                    fontSize: "1.1rem",
+                  }}
+                />
+                <button
+                  className="btn-primary"
+                  style={{
+                    width: "40px",
+                    height: "40px",
+                    padding: 0,
+                    fontSize: "1.2rem",
+                  }}
+                  onClick={() => setQuantity((q) => Math.min(50, q + 1))}
+                >
+                  +
+                </button>
+              </div>
+            </div>
+
             <div className="latency-display">
               <div
                 className="latency-value"
@@ -541,10 +739,41 @@ function App() {
                 ))}
               </div>
               <div className="status-flow">
-                <span className="flow-step">Pending</span> →{" "}
-                <span className="flow-step active">Stock Verified</span> →{" "}
-                <span className="flow-step">In Kitchen</span> →{" "}
-                <span className="flow-step">Ready</span>
+                {(() => {
+                  const latestStatus =
+                    orderStatuses.length > 0 ? orderStatuses[0].status : "";
+                  const steps = [
+                    { label: "Pending", key: "PENDING" },
+                    { label: "Stock Verified", key: "STOCK_VERIFIED" },
+                    { label: "In Kitchen", key: "IN_KITCHEN" },
+                    { label: "Ready", key: "READY" },
+                  ];
+                  const stepOrder = [
+                    "PENDING",
+                    "STOCK_VERIFIED",
+                    "IN_KITCHEN",
+                    "READY",
+                  ];
+                  const currentIdx = stepOrder.indexOf(latestStatus);
+                  return steps.map((step, i) => (
+                    <span key={step.key}>
+                      <span
+                        className={`flow-step${i <= currentIdx ? " active" : ""}${i === currentIdx ? " current" : ""}`}
+                        style={
+                          i <= currentIdx
+                            ? {
+                                backgroundColor: getStatusColor(step.key),
+                                color: "#fff",
+                              }
+                            : {}
+                        }
+                      >
+                        {step.label}
+                      </span>
+                      {i < steps.length - 1 && " → "}
+                    </span>
+                  ));
+                })()}
               </div>
             </div>
           )}
@@ -573,6 +802,128 @@ function App() {
       {/* METRICS VIEW */}
       {view === "metrics" && <MetricsPage />}
 
+      {/* ORDER HISTORY VIEW */}
+      {view === "orders" && (
+        <div className="admin-page">
+          <h2>📋 Order History</h2>
+          <div className="main-card">
+            {orderHistory.length === 0 ? (
+              <p
+                style={{
+                  color: "#a1a1aa",
+                  textAlign: "center",
+                  padding: "2rem",
+                }}
+              >
+                No orders placed yet. Go to Dashboard to place your first order!
+              </p>
+            ) : (
+              <div className="order-tracker">
+                {orderHistory.map((order: any, i: number) => (
+                  <div
+                    key={order.id || i}
+                    className="order-status-row"
+                    style={{
+                      padding: "0.75rem",
+                      borderBottom: "1px solid #333",
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "1rem",
+                        flexWrap: "wrap",
+                        width: "100%",
+                      }}
+                    >
+                      <span
+                        className="order-id"
+                        style={{
+                          fontFamily: "monospace",
+                          fontSize: "0.8rem",
+                          color: "#a1a1aa",
+                        }}
+                      >
+                        {order.orderId?.substring(0, 20)}...
+                      </span>
+                      <span
+                        style={{
+                          color: "var(--text-primary)",
+                          fontWeight: 500,
+                        }}
+                      >
+                        {order.itemId
+                          ? items.find((it) => it.id === order.itemId)?.name ||
+                            order.itemId.substring(0, 8)
+                          : "—"}
+                      </span>
+                      <span style={{ color: "#a1a1aa", fontSize: "0.85rem" }}>
+                        ×{order.quantity || 1}
+                      </span>
+                      <span
+                        className="order-status-badge"
+                        style={{
+                          backgroundColor: getStatusColor(order.status),
+                          marginLeft: "auto",
+                        }}
+                      >
+                        {order.status}
+                      </span>
+                      <span
+                        className="order-time"
+                        style={{ fontSize: "0.8rem", color: "#71717a" }}
+                      >
+                        {order.createdAt
+                          ? new Date(order.createdAt).toLocaleString()
+                          : ""}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="main-card" style={{ marginTop: "1.5rem" }}>
+            <h3 style={{ marginBottom: "1rem" }}>📊 Order Summary</h3>
+            <div className="stats-grid">
+              <div className="stat-card">
+                <span className="stat-label">Total Orders</span>
+                <span className="stat-value">{orderHistory.length}</span>
+              </div>
+              <div className="stat-card">
+                <span className="stat-label">Ready</span>
+                <span
+                  className="stat-value"
+                  style={{ color: "var(--success)" }}
+                >
+                  {orderHistory.filter((o: any) => o.status === "READY").length}
+                </span>
+              </div>
+              <div className="stat-card">
+                <span className="stat-label">In Kitchen</span>
+                <span className="stat-value" style={{ color: "#eab308" }}>
+                  {
+                    orderHistory.filter((o: any) => o.status === "IN_KITCHEN")
+                      .length
+                  }
+                </span>
+              </div>
+              <div className="stat-card">
+                <span className="stat-label">Failed</span>
+                <span className="stat-value" style={{ color: "var(--danger)" }}>
+                  {
+                    orderHistory.filter((o: any) => o.status === "FAILED")
+                      .length
+                  }
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ADMIN VIEW */}
       {view === "admin" && (
         <div className="admin-page">
@@ -599,25 +950,49 @@ function App() {
             <p style={{ color: "#a1a1aa", marginBottom: "1rem" }}>
               Kill a service to observe system behavior under partial failure:
             </p>
-            <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap" }}>
-              <button
-                className="btn-danger"
-                onClick={() => triggerChaos("stock-service")}
-              >
-                Kill Stock Service
-              </button>
-              <button
-                className="btn-danger"
-                onClick={() => triggerChaos("kitchen-service")}
-              >
-                Kill Kitchen Service
-              </button>
-              <button
-                className="btn-danger"
-                onClick={() => triggerChaos("notification-hub")}
-              >
-                Kill Notification Hub
-              </button>
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: "0.75rem",
+              }}
+            >
+              {["stock-service", "kitchen-service", "notification-hub"].map(
+                (svc) => (
+                  <div
+                    key={svc}
+                    style={{
+                      display: "flex",
+                      gap: "0.5rem",
+                      alignItems: "center",
+                    }}
+                  >
+                    <span
+                      style={{
+                        flex: 1,
+                        color: "var(--text-primary)",
+                        fontSize: "0.95rem",
+                      }}
+                    >
+                      {svc}
+                    </span>
+                    <button
+                      className="btn-danger"
+                      style={{ minWidth: "80px" }}
+                      onClick={() => triggerChaos(svc)}
+                    >
+                      💀 Kill
+                    </button>
+                    <button
+                      className="btn-primary"
+                      style={{ minWidth: "80px" }}
+                      onClick={() => restartService(svc)}
+                    >
+                      🔄 Start
+                    </button>
+                  </div>
+                ),
+              )}
             </div>
           </div>
 
@@ -714,10 +1089,7 @@ const ServiceMetricsViewer = ({
     const exactMatch = rawData.match(new RegExp(`^${key} ([0-9.e+-]+)`, "m"));
     if (exactMatch) return parseFloat(exactMatch[1]);
     // Sum across all labeled instances: "metric_name{...} 123"
-    const regex = new RegExp(
-      `^${key}\\{[^}]*\\}\\s+([0-9.e+-]+)`,
-      "gm",
-    );
+    const regex = new RegExp(`^${key}\\{[^}]*\\}\\s+([0-9.e+-]+)`, "gm");
     let total = 0;
     let found = false;
     let match;
@@ -777,6 +1149,29 @@ const ServiceMetricsViewer = ({
       label: "Orders Failed",
       value: getValue("orders_failed_total").toString(),
       color: "var(--danger)",
+    });
+    const cbState = getValue("circuit_breaker_state");
+    const cbLabel =
+      cbState === 0 ? "CLOSED" : cbState === 1 ? "HALF_OPEN" : "OPEN";
+    businessMetrics.push({
+      label: "Circuit Breaker",
+      value: cbLabel,
+      color:
+        cbState === 0
+          ? "var(--success)"
+          : cbState === 1
+            ? "#eab308"
+            : "var(--danger)",
+    });
+    businessMetrics.push({
+      label: "Cache Hits",
+      value: getValue("cache_hits_total").toString(),
+      color: "var(--success)",
+    });
+    businessMetrics.push({
+      label: "Cache Misses",
+      value: getValue("cache_misses_total").toString(),
+      color: "#eab308",
     });
   }
   if (isIdentity) {
@@ -856,8 +1251,7 @@ const ServiceMetricsViewer = ({
   businessMetrics.push({
     label: "Avg Latency",
     value: `${avgLatencyMs}ms`,
-    color:
-      parseFloat(avgLatencyMs) > 1000 ? "var(--danger)" : "var(--success)",
+    color: parseFloat(avgLatencyMs) > 1000 ? "var(--danger)" : "var(--success)",
   });
   businessMetrics.push({
     label: "Total Requests",

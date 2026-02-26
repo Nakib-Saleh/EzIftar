@@ -59,7 +59,11 @@ app.use((req, res, next) => {
 // ============================================
 app.get("/health", async (req: Request, res: Response) => {
   if (shuttingDown) {
-    res.status(503).json({ status: "DOWN", service: "stock-service", reason: "SHUTTING_DOWN" });
+    res.status(503).json({
+      status: "DOWN",
+      service: "stock-service",
+      reason: "SHUTTING_DOWN",
+    });
     return;
   }
   try {
@@ -116,7 +120,7 @@ async function syncAllStockToCache() {
   try {
     const items = await prisma.menuItem.findMany();
     for (const item of items) {
-      await redis.set(`stock:${item.id}`, item.stock.toString(), "EX", 300); // 5min TTL
+      await redis.set(`stock:${item.id}`, item.stock.toString(), "EX", 86400); // 24h TTL (write-through keeps it fresh)
     }
     console.log("Stock synced to Redis cache");
   } catch (e) {
@@ -170,6 +174,10 @@ app.post("/reset", async (req: Request, res: Response) => {
 // Get all menu items
 // ============================================
 app.get("/items", async (req: Request, res: Response) => {
+  if (shuttingDown) {
+    res.status(503).json({ error: "Service is down (chaos mode)" });
+    return;
+  }
   const items = await prisma.menuItem.findMany({ orderBy: { name: "asc" } });
   res.json(items);
 });
@@ -225,7 +233,7 @@ async function deductStock(itemId: string, quantity: number, orderId: string) {
         `stock:${itemId}`,
         (item.stock - quantity).toString(),
         "EX",
-        300,
+        86400, // 24h TTL — write-through on every deduction keeps cache fresh
       );
     } catch (e) {
       console.error("Redis cache update failed:", e);
@@ -240,6 +248,10 @@ async function deductStock(itemId: string, quantity: number, orderId: string) {
 }
 
 app.post("/stock/deduct", async (req: Request, res: Response) => {
+  if (shuttingDown) {
+    res.status(503).json({ error: "Service is down (chaos mode)" });
+    return;
+  }
   const { itemId, quantity, orderId } = req.body;
 
   if (!itemId || !quantity || !orderId) {
@@ -279,8 +291,12 @@ let shuttingDown = false;
 
 app.post("/admin/shutdown", (req: Request, res: Response) => {
   shuttingDown = true;
-  res.json({ message: "Stock service shutting down..." });
-  setTimeout(() => process.exit(1), 8000);
+  res.json({ message: "Stock service entering degraded mode (chaos)" });
+});
+
+app.post("/admin/restore", (req: Request, res: Response) => {
+  shuttingDown = false;
+  res.json({ message: "Stock service restored" });
 });
 
 app.listen(PORT, async () => {

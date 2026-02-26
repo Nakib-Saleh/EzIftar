@@ -123,7 +123,7 @@
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
       "targets": [
         {
-          "expr": "connected_clients",
+          "expr": "websocket_connected_clients",
           "legendFormat": "clients",
           "refId": "A"
         }

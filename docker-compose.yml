@@ -12,7 +12,8 @@ services:
       - JWT_SECRET=${JWT_SECRET}
       - JWT_EXPIRES_IN=${JWT_EXPIRES_IN}
     depends_on:
-      - identity-db
+      identity-db:
+        condition: service_healthy
     command: sh -c "bunx prisma db push && bun dist/index.js"
     restart: always
 
@@ -33,12 +34,18 @@ services:
       - JWT_SECRET=${JWT_SECRET}
       - RABBITMQ_URL=amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672
     depends_on:
-      - identity-provider
-      - stock-service
-      - kitchen-service
-      - notification-hub
-      - redis
-      - rabbitmq
+      identity-provider:
+        condition: service_started
+      stock-service:
+        condition: service_started
+      kitchen-service:
+        condition: service_started
+      notification-hub:
+        condition: service_started
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     restart: always
 
   # ============================================
@@ -54,8 +61,10 @@ services:
       - REDIS_URL=redis://redis:6379
       - RABBITMQ_URL=amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672
     depends_on:
-      - stock-db
-      - redis
+      stock-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     command: sh -c "bunx prisma db push && bun dist/index.js"
     restart: always
 
@@ -72,8 +81,10 @@ services:
       - RABBITMQ_URL=amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672
       - NOTIFICATION_HUB_URL=http://notification-hub:3004
     depends_on:
-      - kitchen-db
-      - rabbitmq
+      kitchen-db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     command: sh -c "bunx prisma db push && bun dist/index.js"
     restart: always
 
@@ -82,13 +93,14 @@ services:
   # ============================================
   notification-hub:
     build: ./services/notification-hub
-    ports:
-      - "3004:3004"
+    expose:
+      - "3004"
     environment:
       - PORT=3004
       - RABBITMQ_URL=amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672
     depends_on:
-      - rabbitmq
+      rabbitmq:
+        condition: service_healthy
     restart: always
 
   # ============================================
@@ -100,11 +112,11 @@ services:
       dockerfile: Dockerfile.prod
       args:
         VITE_API_GATEWAY_URL: http://localhost:8080/api
-        VITE_NOTIFICATION_HUB_URL: http://localhost:3004
     ports:
       - "5173:80"
     depends_on:
       - order-gateway
+      - notification-hub
 
   # ============================================
   # DATABASES
@@ -119,6 +131,15 @@ services:
       - identity-db-data:/var/lib/postgresql/data
     ports:
       - "5433:5432"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${IDENTITY_DB_USER} -d ${IDENTITY_DB_NAME}",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   stock-db:
     image: postgres:14-alpine
@@ -130,6 +151,11 @@ services:
       - stock-db-data:/var/lib/postgresql/data
     ports:
       - "5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${STOCK_DB_USER} -d ${STOCK_DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   kitchen-db:
     image: postgres:14-alpine
@@ -141,6 +167,12 @@ services:
       - kitchen-db-data:/var/lib/postgresql/data
     ports:
       - "5435:5432"
+    healthcheck:
+      test:
+        ["CMD-SHELL", "pg_isready -U ${KITCHEN_DB_USER} -d ${KITCHEN_DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # ============================================
   # INFRASTRUCTURE
@@ -152,6 +184,11 @@ services:
     volumes:
       - redis-data:/data
     restart: always
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   rabbitmq:
     image: rabbitmq:3-management
@@ -164,6 +201,11 @@ services:
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
     restart: always
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
 
   # ============================================
   # MONITORING
