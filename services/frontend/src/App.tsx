@@ -20,6 +20,8 @@ interface OrderStatus {
   orderId: string;
   status: string;
   timestamp: string;
+  itemName?: string;
+  quantity?: number;
 }
 
 function App() {
@@ -132,6 +134,19 @@ function App() {
   useEffect(() => {
     if (!token || !user) return;
 
+    let destroyed = false; // cleanup flag — prevents reconnect after unmount
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const scheduleReconnect = (delayMs: number) => {
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      reconnectTimer = setTimeout(() => {
+        if (!destroyed && !newSocket.connected) {
+          addLog("🔄 Attempting reconnection...");
+          newSocket.connect();
+        }
+      }, delayMs);
+    };
+
     const newSocket = io(WS_URL, {
       transports: ["websocket"],
       reconnectionAttempts: Infinity,
@@ -142,6 +157,8 @@ function App() {
 
     newSocket.on("connect", () => {
       console.log("WebSocket connected");
+      // Clear any pending retry — we're connected now
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
       newSocket.emit("join", user.studentId);
       setWsConnected(true);
       addLog("🟢 WebSocket connected — real-time updates active");
@@ -153,10 +170,22 @@ function App() {
       addLog(`🔴 WebSocket disconnected (${reason}) — switching to polling`);
       // Immediately re-check health so the UI reflects the change right away
       checkHealth();
+
+      // "io server disconnect" means the server called socket.disconnect() or
+      // disconnectSockets() — Socket.IO will NOT auto-reconnect in this case.
+      // We must manually reconnect so that admin restore works.
+      if (reason === "io server disconnect") {
+        scheduleReconnect(3000);
+      }
     });
 
-    newSocket.on("connect_error", () => {
+    // Socket.IO auto-reconnects transport failures (server crash, network loss)
+    // but does NOT retry after namespace middleware rejections (chaos mode).
+    // We must retry manually so the client reconnects once the hub is restored.
+    newSocket.on("connect_error", (err) => {
+      console.warn("WebSocket connect_error:", err.message);
       setWsConnected(false);
+      scheduleReconnect(3000);
     });
 
     newSocket.on("orderStatus", (data: OrderStatus) => {
@@ -167,7 +196,8 @@ function App() {
         const existing = prev.findIndex((o) => o.orderId === data.orderId);
         if (existing >= 0) {
           const updated = [...prev];
-          updated[existing] = data;
+          // Preserve item info from the original entry
+          updated[existing] = { ...data, itemName: updated[existing].itemName || data.itemName, quantity: updated[existing].quantity || data.quantity };
           return updated;
         }
         return [data, ...prev];
@@ -205,6 +235,8 @@ function App() {
     });
 
     return () => {
+      destroyed = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
       newSocket.disconnect();
     };
   }, [token, user]);
@@ -222,14 +254,16 @@ function App() {
       "kitchen",
       "notification",
     ];
-    for (const svc of services) {
-      try {
-        await axios.get(`${API_GATEWAY_URL}/health/${svc}`, { timeout: 3000 });
-        setHealth((prev) => ({ ...prev, [svc]: "UP" }));
-      } catch {
-        setHealth((prev) => ({ ...prev, [svc]: "DOWN" }));
-      }
-    }
+    await Promise.all(
+      services.map(async (svc) => {
+        try {
+          await axios.get(`${API_GATEWAY_URL}/health/${svc}`, { timeout: 3000 });
+          setHealth((prev) => ({ ...prev, [svc]: "UP" }));
+        } catch {
+          setHealth((prev) => ({ ...prev, [svc]: "DOWN" }));
+        }
+      }),
+    );
   }, []);
 
   const fetchStats = useCallback(async () => {
@@ -277,24 +311,50 @@ function App() {
       "READY",
       "FAILED",
     ];
+
+    // Compare orderStatuses (live WS state) against orderHistory (DB ground truth)
+    // and recover any missed status transitions.
+    // NOTE: We compute the diff OUTSIDE setState to avoid React 18 async batching
+    // issues — the updater function runs later, so any data collected inside it
+    // would not be available synchronously after the setState call.
     setOrderStatuses((prev) => {
       let updated = [...prev];
       let changed = false;
+      const recoveredLogs: string[] = [];
+
       for (const order of orderHistory) {
         const idx = updated.findIndex((o) => o.orderId === order.orderId);
         if (idx >= 0) {
           const currentLevel = statusOrder.indexOf(updated[idx].status);
           const historyLevel = statusOrder.indexOf(order.status);
           if (historyLevel > currentLevel) {
+            // Find item name from current items list
+            const matchedItem = items.find((it: MenuItem) => it.id === order.itemId);
             updated[idx] = {
               orderId: order.orderId,
               status: order.status,
               timestamp: order.updatedAt || order.createdAt,
+              itemName: updated[idx].itemName || matchedItem?.name || order.itemId,
+              quantity: updated[idx].quantity || order.quantity,
             };
             changed = true;
+            recoveredLogs.push(
+              `🔄 Recovered: Order ${order.orderId.substring(0, 12)}... → ${order.status} (from DB)`,
+            );
           }
         }
       }
+
+      // Log inside the updater — this runs during React's render phase
+      // so we use queueMicrotask to defer the addLog calls safely
+      if (recoveredLogs.length > 0) {
+        queueMicrotask(() => {
+          for (const msg of recoveredLogs) {
+            addLog(msg);
+          }
+        });
+      }
+
       return changed ? updated : prev;
     });
   }, [orderHistory]);
@@ -311,7 +371,7 @@ function App() {
     init();
   }, [view]);
 
-  // Polling: only when WebSocket is disconnected (5s recovery mode)
+  // Polling: full recovery mode when WebSocket is disconnected (5s)
   // When connected, all updates arrive via WebSocket — no polling needed
   useEffect(() => {
     if (view === "login" || wsConnected) return;
@@ -327,6 +387,22 @@ function App() {
       clearInterval(recoveryInterval);
     };
   }, [view, wsConnected]);
+
+  // Order reconciliation: always poll orders from DB as a safety net
+  // Catches missed WebSocket events (e.g. notification-hub was briefly down)
+  useEffect(() => {
+    if (view === "login" || !token) return;
+    // Skip if already polling everything above (WS disconnected)
+    if (!wsConnected) return;
+
+    const reconcileInterval = setInterval(() => {
+      fetchOrders();
+    }, 10000);
+
+    return () => {
+      clearInterval(reconcileInterval);
+    };
+  }, [view, token, wsConnected, fetchOrders]);
 
   // ============================================
   // Order Placement
@@ -353,16 +429,20 @@ function App() {
         `✅ Order Accepted! Duration: ${dur}ms | Status: ${res.data.status}`,
       );
 
+      // Find the item name from the items list
+      const orderedItem = items.find((it) => it.id === selectedItem);
       setOrderStatuses((prev) => {
         const existing = prev.findIndex((o) => o.orderId === res.data.orderId);
-        const entry = {
+        const entry: OrderStatus = {
           orderId: res.data.orderId,
           status: res.data.status,
           timestamp: new Date().toISOString(),
+          itemName: orderedItem?.name || selectedItem,
+          quantity,
         };
         if (existing >= 0) {
           const updated = [...prev];
-          updated[existing] = entry;
+          updated[existing] = { ...entry, itemName: updated[existing].itemName || entry.itemName, quantity: updated[existing].quantity || entry.quantity };
           return updated;
         }
         return [entry, ...prev];
@@ -374,6 +454,20 @@ function App() {
       const dur = Math.round(performance.now() - start);
       setLatency(dur);
       addLog(`❌ Failed: ${error.response?.data?.error || error.message}`);
+
+      // Mark any PENDING order that arrived via WebSocket (fire-and-forget notify)
+      // as FAILED so the Live Order Status doesn't misleadingly show PENDING
+      setOrderStatuses((prev) => {
+        // Find the most recent PENDING entry — the gateway emitted it before
+        // the stock call failed, so it's sitting in the list looking misleading
+        const idx = prev.findIndex((o) => o.status === "PENDING");
+        if (idx >= 0) {
+          const updated = [...prev];
+          updated[idx] = { ...updated[idx], status: "FAILED" };
+          return updated;
+        }
+        return prev;
+      });
     } finally {
       setLoading(false);
     }
@@ -723,6 +817,21 @@ function App() {
               <div className="order-tracker">
                 {orderStatuses.map((os, i) => (
                   <div key={i} className="order-status-row">
+                    <span style={{ fontSize: "0.95rem", fontWeight: 600, color: "#f4f4f5" }}>
+                      {os.itemName || "Order"}
+                    </span>
+                    {os.quantity && (
+                      <span style={{
+                        fontSize: "0.7rem",
+                        padding: "0.15rem 0.5rem",
+                        borderRadius: "10px",
+                        background: "rgba(139,92,246,0.2)",
+                        color: "#a78bfa",
+                        fontWeight: 600,
+                      }}>
+                        ×{os.quantity}
+                      </span>
+                    )}
                     <span className="order-id">
                       {os.orderId.substring(0, 16)}...
                     </span>

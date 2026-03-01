@@ -41,7 +41,7 @@ services:
       kitchen-service:
         condition: service_started
       notification-hub:
-        condition: service_started
+        condition: service_healthy
       redis:
         condition: service_healthy
       rabbitmq:
@@ -102,6 +102,11 @@ services:
       rabbitmq:
         condition: service_healthy
     restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3004/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # ============================================
   # FRONTEND - React + Vite SPA (Production Build)

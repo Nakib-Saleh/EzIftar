@@ -201,6 +201,35 @@ app.get("/metrics", async (req: Request, res: Response) => {
 });
 
 // ============================================
+// Record a failed order (called by gateway when stock deduction fails)
+// ============================================
+app.post("/orders/failed", async (req: Request, res: Response) => {
+  const { orderId, itemId, quantity, studentId, studentName, reason } = req.body;
+  if (!orderId || !studentId) {
+    res.status(400).json({ error: "Missing orderId or studentId" });
+    return;
+  }
+  try {
+    const order = await prisma.kitchenOrder.upsert({
+      where: { orderId },
+      create: {
+        orderId,
+        itemId: itemId || "unknown",
+        quantity: quantity || 1,
+        studentId,
+        studentName: studentName || "unknown",
+        status: "FAILED",
+      },
+      update: { status: "FAILED" },
+    });
+    res.status(200).json(order);
+  } catch (e: any) {
+    console.error("Failed to record failed order:", e.message);
+    res.status(500).json({ error: "Failed to record order" });
+  }
+});
+
+// ============================================
 // Get orders (by studentId or all)
 // ============================================
 app.get("/orders", async (req: Request, res: Response) => {

@@ -57,6 +57,17 @@ app.use((req, res, next) => {
 // ============================================
 // WebSocket Connection Handling
 // ============================================
+// Reject new connections while in chaos/shutdown mode
+// Without this, Socket.IO clients auto-reconnect after disconnectSockets(),
+// wsConnected becomes true, polling stops, but /notify returns 503 = silent data loss
+io.use((socket, next) => {
+  if (shuttingDown) {
+    next(new Error("Service is shutting down"));
+  } else {
+    next();
+  }
+});
+
 io.on("connection", (socket) => {
   console.log(`Client connected: ${socket.id}`);
   connectedClients.inc();
@@ -113,6 +124,10 @@ app.post("/notify", (req: Request, res: Response) => {
 // Stock Update Broadcast (called by gateway after order)
 // ============================================
 app.post("/broadcast/stock", (req: Request, res: Response) => {
+  if (shuttingDown) {
+    res.status(503).json({ error: "Service is down (chaos mode)" });
+    return;
+  }
   const { items } = req.body;
   if (items) {
     io.emit("stockUpdate", items);
@@ -124,6 +139,10 @@ app.post("/broadcast/stock", (req: Request, res: Response) => {
 // Health Update Broadcast (called by gateway periodically)
 // ============================================
 app.post("/broadcast/health", (req: Request, res: Response) => {
+  if (shuttingDown) {
+    res.status(503).json({ error: "Service is down (chaos mode)" });
+    return;
+  }
   const healthData = req.body;
   if (healthData) {
     io.emit("healthUpdate", healthData);
@@ -135,6 +154,10 @@ app.post("/broadcast/health", (req: Request, res: Response) => {
 // Stats Update Broadcast (called by gateway periodically)
 // ============================================
 app.post("/broadcast/stats", (req: Request, res: Response) => {
+  if (shuttingDown) {
+    res.status(503).json({ error: "Service is down (chaos mode)" });
+    return;
+  }
   const statsData = req.body;
   if (statsData) {
     io.emit("statsUpdate", statsData);
@@ -146,6 +169,10 @@ app.post("/broadcast/stats", (req: Request, res: Response) => {
 // Circuit Breaker State Broadcast (called by gateway on state change)
 // ============================================
 app.post("/broadcast/circuit-breaker", (req: Request, res: Response) => {
+  if (shuttingDown) {
+    res.status(503).json({ error: "Service is down (chaos mode)" });
+    return;
+  }
   const cbData = req.body;
   if (cbData) {
     io.emit("circuitBreakerUpdate", cbData);
@@ -189,6 +216,9 @@ let shuttingDown = false;
 
 app.post("/admin/shutdown", (req: Request, res: Response) => {
   shuttingDown = true;
+  // Disconnect all WebSocket clients so frontends detect the outage
+  // and switch to polling mode (instead of silently losing events)
+  io.disconnectSockets(true);
   res.json({ message: "Notification hub entering degraded mode (chaos)" });
 });
 
