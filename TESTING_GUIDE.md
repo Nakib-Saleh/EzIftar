@@ -51,7 +51,9 @@ docker compose exec kitchen-service bun test
 
 # Notification Hub — 9 tests
 # Covers: payload validation, room routing, event emission, status tracking
-docker compose exec notification-hub bun test
+# NOTE: notification-hub runs on node:18-alpine (for Socket.IO WebSocket support),
+# so bun is not available inside the container. Run tests in a separate Bun container:
+docker run --rm -v "${PWD}/services/notification-hub:/app" -w /app oven/bun bun test
 
 # Order Gateway — 33 tests
 # Covers: JWT middleware, order validation, unique ID generation, Redis cache logic,

@@ -135,8 +135,11 @@ The **Admin Dashboard** includes a chaos toggle to kill/restore services and obs
 docker compose exec identity-provider bun test   # 11 tests
 docker compose exec stock-service bun test        # 16 tests
 docker compose exec kitchen-service bun test      # 14 tests
-docker compose exec notification-hub bun test     # 9 tests
 docker compose exec order-gateway bun test        # 33 tests
+
+# Notification Hub runs on node:18-alpine (for Socket.IO WebSocket support),
+# so tests must run in a separate Bun container:
+docker run --rm -v "$(pwd)/services/notification-hub:/app" -w /app oven/bun bun test  # 9 tests
 
 # Run integration tests (16 tests against live stack)
 docker run --rm \
@@ -145,6 +148,9 @@ docker run --rm \
   -e STOCK_SERVICE_URL=http://stock-service:3002 \
   --network eziftar_default \
   oven/bun sh -c "cd /tests && bun install && bun test --timeout 30000"
+
+# PowerShell: replace \ with ` and $(pwd) with ${PWD}
+# See TESTING_GUIDE.md for the PowerShell version of the above commands
 
 # Run load test
 chmod +x scripts/load-test.sh
