@@ -469,9 +469,10 @@ app.post("/api/orders", jwtMiddleware, async (req: Request, res: Response) => {
     }
   }
 
+  let orderId = "";
   try {
     // Generate orderId early so we can emit PENDING status
-    const orderId = `order-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    orderId = `order-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
     // Emit PENDING status via Notification Hub (fire-and-forget)
     axios
@@ -575,6 +576,22 @@ app.post("/api/orders", jwtMiddleware, async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error("Order placement failed:", error.message);
     ordersFailedTotal.inc();
+
+    // Record the failed order in kitchen DB for audit trail (fire-and-forget)
+    axios
+      .post(
+        `${KITCHEN_SERVICE_URL}/orders/failed`,
+        {
+          orderId,
+          itemId,
+          quantity,
+          studentId: user.studentId,
+          studentName: user.name,
+          reason: error.message,
+        },
+        { timeout: 2000 },
+      )
+      .catch(() => {});
 
     if (error.message === "Circuit breaker is OPEN") {
       res.status(503).json({
