@@ -20,16 +20,16 @@ EzIftar is a distributed, fault-tolerant microservice system designed to handle 
 
 ```mermaid
 flowchart LR
-    A[Frontend\nReact + Vite] -->|HTTP + JWT| B[Order Gateway\nJWT + Redis Cache]
-    B -->|Authenticate| C[Identity Provider\nBcrypt + JWT]
-    B -->|Check Stock| D[Stock Service\nOptimistic Locking]
+    A["Frontend<br/>React + Vite"] -->|HTTP + JWT| B["Order Gateway<br/>JWT + Redis Cache"]
+    B -->|Authenticate| C["Identity Provider<br/>Bcrypt + JWT"]
+    B -->|Check Stock| D["Stock Service<br/>Optimistic Locking"]
     B -->|Cache| E[(Redis)]
     C --- C_DB[(Identity DB)]
     D --- D_DB[(Stock DB)]
     B -->|Publish| F[RabbitMQ]
-    F -->|Consume| G[Kitchen Service\nAsync Cooking]
+    F -->|Consume| G["Kitchen Service<br/>Async Cooking"]
     G --- G_DB[(Kitchen DB)]
-    G -->|Status Update| H[Notification Hub\nSocket.IO]
+    G -->|Status Update| H["Notification Hub<br/>Socket.IO"]
     H -->|WebSocket| A
 ```
 
