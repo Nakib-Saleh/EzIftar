@@ -1,13 +1,13 @@
 
 EzIftar — Demo Video Script (3 Minutes)
 
-IUT Cafeteria's old Ramadan ordering system was a single monolith — and it just couldn't handle the rush. We saw database locks, cascading failures, lost orders, and frustrated students. So, we broke it apart into six independent microservices, each running in its own container and connected through message queues, caches, and WebSockets. Now, the whole system spins up with a single `docker compose up` — thirteen containers, zero manual setup.
+IUT Cafeteria's old Ramadan ordering system was a single monolith — and it just couldn't handle the rush. So, we broke it apart into six independent microservices, each running in its own container . Now, the whole system spins up with a single `docker compose up`.
 
 
 Student Registration & Login
 -----------------------------------
 
-A student registers with their ID, name, and password. On submit, the Identity Provider hashes the password with bcrypt, stores it in PostgreSQL, and immediately returns a JWT — the student lands on the Dashboard with no extra login step.
+At first the registartion. A student registers with their ID, name, and password. On submit, the Identity Provider hashes the password with bcrypt, stores it in PostgreSQL, and immediately returns a JWT — the student lands on the Dashboard with no extra login step.
 
 Security is built in — if you enter the wrong password three times within a minute, you'll see a 429 Too Many Requests error. That's our rate limiter at the Identity Provider, blocking brute-force attacks. After waiting for the time window to reset, we log in with the correct credentials, and we're taken straight to the EzIftar dashboard.
 
