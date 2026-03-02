@@ -14,10 +14,8 @@ This guide covers every implemented feature end-to-end, matching the project req
 ## Step 1 — Start the Full Stack
 
 ```powershell
-cd D:\EzIftar
-
-# Copy env template if .env doesn't exist yet
-Copy-Item .env.example .env
+# Navigate to the project root (wherever you cloned it)
+cd EzIftar
 
 docker compose up --build -d
 ```
@@ -53,7 +51,9 @@ docker compose exec kitchen-service bun test
 
 # Notification Hub — 9 tests
 # Covers: payload validation, room routing, event emission, status tracking
-docker compose exec notification-hub bun test
+# NOTE: notification-hub runs on node:18-alpine (for Socket.IO WebSocket support),
+# so bun is not available inside the container. Run tests in a separate Bun container:
+docker run --rm -v "${PWD}/services/notification-hub:/app" -w /app oven/bun bun test
 
 # Order Gateway — 33 tests
 # Covers: JWT middleware, order validation, unique ID generation, Redis cache logic,
@@ -73,8 +73,7 @@ These tests run against the **live running stack** and verify the full HTTP flow
 Bun is not installed on the Windows host — it only exists inside the Docker containers. Run the integration tests inside a temporary Bun container attached to the compose network:
 
 ```powershell
-cd D:\EzIftar
-
+# From the project root
 docker run --rm `
   -v "${PWD}/tests/integration:/tests" `
   -e GATEWAY_URL=http://order-gateway:8080 `
@@ -97,7 +96,7 @@ docker run --rm `
 # Install Bun (one-time)
 winget install Oven-sh.Bun
 # Restart your terminal, then:
-cd D:\EzIftar\tests\integration
+cd tests/integration
 bun install
 bun test --timeout 30000
 ```
@@ -184,6 +183,7 @@ Open **http://localhost:5173** in your browser.
 PENDING → STOCK_VERIFIED → IN_KITCHEN → READY
 ```
 
+- Each order card shows: **item name** (e.g. `Chicken Biryani`), **quantity badge** (e.g. `×3` in purple), order ID, status badge, and timestamp
 - The stock count in the dropdown decreases by 3 immediately after ordering (WebSocket `stockUpdate` push)
 - Latency badge shows green (<1000ms) or red (>1000ms)
 
@@ -199,6 +199,7 @@ PENDING → STOCK_VERIFIED → IN_KITCHEN → READY
 - Each order shows: item name, quantity (e.g. `×3`), status badge (🟢 READY / 🟡 IN_KITCHEN / 🔴 FAILED), timestamp
 - Summary bar at the bottom shows correct counts: **Total / Ready / In Kitchen / Failed**
 - Place another order → the Orders view refreshes automatically when the new order status updates
+- **Failed orders** (e.g. from a killed service or circuit breaker) also appear here with a 🔴 FAILED badge
 
 ---
 
@@ -214,6 +215,7 @@ PENDING → STOCK_VERIFIED → IN_KITCHEN → READY
 - Stock dropdown updates instantly after placing an order (pushed via `stockUpdate` WebSocket event)
 - Order history refreshes on `orderUpdate` events, not on a polling timer
 - A 30-second fallback poll still fires if WebSocket events are missed — this is acceptable
+- If the notification hub goes down and comes back, WebSocket **auto-reconnects** within ~3 seconds — system activity log shows `Reconnected — real-time updates active`
 
 ---
 
@@ -243,6 +245,7 @@ PENDING → STOCK_VERIFIED → IN_KITCHEN → READY
 
 - Health panel turns red for `stock-service` within ~10s (pushed via `healthUpdate` WebSocket event)
 - Trying to place an order returns an error (circuit breaker: `CIRCUIT_OPEN` after 5 failures)
+- **Failed orders** appear in Live Order Status with a 🔴 FAILED badge and are recorded in Order History
 - Chaos log entry appears in the Admin panel
 
 3. Click **Restart stock-service** (or use `docker compose start stock-service`)
@@ -253,7 +256,23 @@ PENDING → STOCK_VERIFIED → IN_KITCHEN → READY
 - Orders succeed again
 - Circuit breaker resets to CLOSED
 
-Repeat for **kitchen-service** and **notification-hub**.
+4. Click **Kill notification-hub**
+
+**Expected:**
+
+- System activity log shows `WebSocket disconnected` and `Falling back to database polling`
+- Orders still process normally (stock deduction + kitchen cooking via RabbitMQ)
+- Live Order Status updates every 5s via DB polling instead of real-time WebSocket
+
+5. Click **Restart notification-hub**
+
+**Expected:**
+
+- WebSocket **auto-reconnects** within ~3 seconds
+- System activity log shows `Reconnected — fetching from DB` followed by `real-time updates active`
+- Live Order Status switches back to real-time WebSocket updates
+
+Repeat kill/restore for **kitchen-service** to verify orders resume after the kitchen comes back online.
 
 ---
 
@@ -471,8 +490,9 @@ Select-String -Path "docker-compose.yml" -Pattern "password|secret|JWT" |
 git ls-files .env
 # Expected: no output (file is gitignored)
 
-# Confirm .env.example exists as template
-Get-Content .env.example
+# Confirm .env is not in the repo
+Test-Path .env
+# Expected: only exists locally, never committed
 ```
 
 ---
@@ -492,10 +512,12 @@ Get-Content .env.example
 | 9   | WebSocket-driven updates (no tight polling) | Step 5e                                     |
 | 10  | Business + process metrics in UI            | Step 5f                                     |
 | 11  | Chaos toggle kills and recovers services    | Step 5g                                     |
-| 12  | Circuit breaker opens/closes                | Step 6                                      |
-| 13  | Idempotency key prevents duplicate orders   | Step 7                                      |
-| 14  | Redis cache hit/miss metrics                | Step 8                                      |
-| 15  | Docker healthchecks + startup ordering      | Step 9                                      |
-| 16  | Prometheus queries + Grafana dashboard      | Step 10                                     |
-| 17  | K8s resource limits on all deployments      | Step 11                                     |
-| 18  | No hardcoded secrets                        | Step 12                                     |
+| 12  | Failed order tracking in history            | Step 5d, 5g                                 |
+| 13  | WebSocket auto-reconnect after service kill | Step 5e, 5g                                 |
+| 14  | Circuit breaker opens/closes                | Step 6                                      |
+| 15  | Idempotency key prevents duplicate orders   | Step 7                                      |
+| 16  | Redis cache hit/miss metrics                | Step 8                                      |
+| 17  | Docker healthchecks + startup ordering      | Step 9                                      |
+| 18  | Prometheus queries + Grafana dashboard      | Step 10                                     |
+| 19  | K8s resource limits on all deployments      | Step 11                                     |
+| 20  | No hardcoded secrets                        | Step 12                                     |

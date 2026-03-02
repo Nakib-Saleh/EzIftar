@@ -78,7 +78,7 @@ function App() {
         studentId: loginStudentId,
         password: loginPassword,
       });
-      const { token: jwt, user: userData } = res.data;
+      const { token: jwt, student: userData } = res.data;
       localStorage.setItem("eziftar_token", jwt);
       setToken(jwt);
       setUser(userData);
