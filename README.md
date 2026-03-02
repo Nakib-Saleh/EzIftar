@@ -186,14 +186,16 @@ docker run --rm `
 ```
 
 ##### Run load test (Windows)
-```
+```powershell
 # Option 1: Open Git Bash or WSL and run:
 ./scripts/load-test.sh
 
 # Option 2: In PowerShell (with Git Bash installed), run:
 bash ./scripts/load-test.sh
 
-# If you do not have Bash installed, you can install [Git for Windows](https://git-scm.com/download/win) or enable [WSL](https://docs.microsoft.com/en-us/windows/wsl/install).
+# If you do not have Bash installed, you can install Git for Windows
+# (https://git-scm.com/download/win) or enable WSL
+# (https://docs.microsoft.com/en-us/windows/wsl/install).
 ```
 See TESTING_GUIDE.md for more details and troubleshooting.
 
