@@ -19,68 +19,18 @@ EzIftar is a distributed, fault-tolerant microservice system designed to handle 
 ## Architecture Overview
 
 ```mermaid
-graph TD
-    subgraph Client
-        A[🖥️ Frontend<br/>React + Vite<br/>Port 5173]
-    end
-
-    subgraph API Layer
-        B[🔀 Order Gateway<br/>JWT + Redis Cache<br/>Port 8080]
-    end
-
-    subgraph Auth
-        C[🔐 Identity Provider<br/>JWT Auth + Bcrypt<br/>Port 3000]
-        C_DB[(🐘 Identity DB<br/>PostgreSQL)]
-    end
-
-    subgraph Inventory
-        D[📦 Stock Service<br/>Optimistic Locking<br/>Port 3002]
-        D_DB[(🐘 Stock DB<br/>PostgreSQL)]
-        E[(⚡ Redis<br/>Cache)]
-    end
-
-    subgraph Messaging
-        F[🐇 RabbitMQ<br/>Message Broker]
-    end
-
-    subgraph Processing
-        G[👨‍🍳 Kitchen Service<br/>Async Cooking<br/>Port 3003]
-        G_DB[(🐘 Kitchen DB<br/>PostgreSQL)]
-    end
-
-    subgraph Realtime
-        H[📡 Notification Hub<br/>WebSocket / Socket.IO<br/>Port 3004]
-    end
-
-    subgraph Monitoring
-        I[📊 Prometheus<br/>Port 9090]
-        J[📈 Grafana<br/>Port 3005]
-    end
-
-    A -->|HTTP + JWT| B
-    B -->|Authenticate| C
-    C --- C_DB
-    B -->|Check / Deduct Stock| D
-    D --- D_DB
-    B --- E
-    B -->|Publish Order| F
-    F -->|Consume Order| G
-    G --- G_DB
-    G -->|Status Update| H
-    H -->|WebSocket Push| A
-    I -->|Scrape Metrics| B & C & D & G & H
-    I --> J
-
-    style A fill:#3b82f6,stroke:#1e40af,color:#fff
-    style B fill:#f59e0b,stroke:#b45309,color:#fff
-    style C fill:#10b981,stroke:#047857,color:#fff
-    style D fill:#8b5cf6,stroke:#5b21b6,color:#fff
-    style G fill:#ef4444,stroke:#991b1b,color:#fff
-    style H fill:#06b6d4,stroke:#0e7490,color:#fff
-    style F fill:#f97316,stroke:#c2410c,color:#fff
-    style E fill:#ec4899,stroke:#9d174d,color:#fff
-    style I fill:#6366f1,stroke:#3730a3,color:#fff
-    style J fill:#14b8a6,stroke:#0f766e,color:#fff
+flowchart LR
+    A[Frontend\nReact + Vite] -->|HTTP + JWT| B[Order Gateway\nJWT + Redis Cache]
+    B -->|Authenticate| C[Identity Provider\nBcrypt + JWT]
+    B -->|Check Stock| D[Stock Service\nOptimistic Locking]
+    B -->|Cache| E[(Redis)]
+    C --- C_DB[(Identity DB)]
+    D --- D_DB[(Stock DB)]
+    B -->|Publish| F[RabbitMQ]
+    F -->|Consume| G[Kitchen Service\nAsync Cooking]
+    G --- G_DB[(Kitchen DB)]
+    G -->|Status Update| H[Notification Hub\nSocket.IO]
+    H -->|WebSocket| A
 ```
 
 ## Services
