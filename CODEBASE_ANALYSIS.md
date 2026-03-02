@@ -239,15 +239,6 @@ All app services have `restart: always`. Databases use named volumes for persist
 
 ---
 
-## What's Missing / Can Be Improved Next
-
-| Gap                                                                                     | Severity                 |
-| --------------------------------------------------------------------------------------- | ------------------------ |
-| **Stock endpoint is unauthenticated** — `GET /api/stock/items` requires no JWT          | Depends on requirements  |
-| **`/reset` endpoint is unauthenticated** — anyone can reset all stock to initial values | Should require admin JWT |
-
----
-
 ## Recently Fixed Gaps
 
 ### Gap Fix 1: Secrets Management (was "Secrets in plaintext")
