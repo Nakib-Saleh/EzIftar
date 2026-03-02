@@ -1,31 +1,36 @@
+
 # EzIftar - Resilient Microservices Cafeteria Ordering System
 
 EzIftar is a distributed, fault-tolerant microservice system designed to handle the IUT Cafeteria's Ramadan Iftar ordering rush. The system breaks a fragile monolith into independent, containerized services that communicate over the network, ensuring reliability under heavy load.
 
+---
+
+## Features
+
+- End-to-end microservices architecture (6 services, 13 containers)
+- Real-time order tracking with WebSockets
+- Fault tolerance: circuit breaker, chaos toggles, graceful degradation
+- Optimistic locking, Redis caching, JWT authentication
+- Live metrics, Grafana dashboards, and full audit trail
+- Automated testing and CI/CD pipeline
+
+---
+
 ## Architecture Overview
 
-```
-┌─────────────┐     ┌──────────────────┐     ┌───────────────┐
-│   Frontend   │────►│  Order Gateway   │────►│ Stock Service  │
-│  (React+Vite)│     │  (JWT + Cache)   │     │ (Prisma + PG)  │
-└─────────────┘     └──────┬───────────┘     └───────┬────────┘
-                           │                         │
-                    ┌──────▼───────┐          ┌──────▼────────┐
-                    │   Identity    │          │     Redis      │
-                    │   Provider    │          │   (Cache)      │
-                    │  (JWT Auth)   │          └───────────────┘
-                    └──────────────┘
-                           │
-                    ┌──────▼───────┐     ┌───────────────────┐
-                    │   RabbitMQ    │────►│  Kitchen Service   │
-                    │  (Msg Broker) │     │ (Async Processing) │
-                    └──────────────┘     └───────┬───────────┘
-                                                 │
-                                          ┌──────▼────────┐
-                                          │ Notification   │
-                                          │    Hub         │
-                                          │  (WebSocket)   │
-                                          └───────────────┘
+```mermaid
+flowchart LR
+    A["Frontend<br/>React + Vite"] -->|HTTP + JWT| B["Order Gateway<br/>JWT + Redis Cache"]
+    B -->|Authenticate| C["Identity Provider<br/>Bcrypt + JWT"]
+    B -->|Check Stock| D["Stock Service<br/>Optimistic Locking"]
+    B -->|Cache| E[(Redis)]
+    C --- C_DB[(Identity DB)]
+    D --- D_DB[(Stock DB)]
+    B -->|Publish| F[RabbitMQ]
+    F -->|Consume| G["Kitchen Service<br/>Async Cooking"]
+    G --- G_DB[(Kitchen DB)]
+    G -->|Status Update| H["Notification Hub<br/>Socket.IO"]
+    H -->|WebSocket| A
 ```
 
 ## Services
@@ -130,6 +135,8 @@ The **Admin Dashboard** includes a chaos toggle to kill/restore services and obs
 
 ## Testing
 
+### Bash (Linux/macOS)
+
 ```bash
 # Run unit tests (83 tests across 5 services)
 docker compose exec identity-provider bun test   # 11 tests
@@ -143,20 +150,56 @@ docker run --rm -v "$(pwd)/services/notification-hub:/app" -w /app oven/bun bun 
 
 # Run integration tests (16 tests against live stack)
 docker run --rm \
-  -v "$(pwd)/tests/integration:/tests" \
-  -e GATEWAY_URL=http://order-gateway:8080 \
-  -e STOCK_SERVICE_URL=http://stock-service:3002 \
-  --network eziftar_default \
-  oven/bun sh -c "cd /tests && bun install && bun test --timeout 30000"
-
-# PowerShell: replace \ with ` and $(pwd) with ${PWD}
-# See TESTING_GUIDE.md for the PowerShell version of the above commands
+       -v "$(pwd)/tests/integration:/tests" \
+       -e GATEWAY_URL=http://order-gateway:8080 \
+       -e STOCK_SERVICE_URL=http://stock-service:3002 \
+       --network eziftar_default \
+       oven/bun sh -c "cd /tests && bun install && bun test --timeout 30000"
 
 # Run load test
 chmod +x scripts/load-test.sh
 ./scripts/load-test.sh
 ```
 
+### PowerShell (Windows)
+
+```powershell
+# Run unit tests (83 tests across 5 services)
+docker compose exec identity-provider bun test   # 11 tests
+docker compose exec stock-service bun test        # 16 tests
+docker compose exec kitchen-service bun test      # 14 tests
+docker compose exec order-gateway bun test        # 33 tests
+
+# Notification Hub runs on node:18-alpine (for Socket.IO WebSocket support),
+# so tests must run in a separate Bun container:
+docker run --rm -v "${PWD}/services/notification-hub:/app" -w /app oven/bun bun test  # 9 tests
+
+# Run integration tests (16 tests against live stack)
+docker run --rm `
+       -v "${PWD}/tests/integration:/tests" `
+       -e GATEWAY_URL=http://order-gateway:8080 `
+       -e STOCK_SERVICE_URL=http://stock-service:3002 `
+       --network eziftar_default `
+       oven/bun sh -c "cd /tests && bun install && bun test --timeout 30000"
+
+
+```
+
+##### Run load test (Windows)
+```powershell
+# Option 1: Open Git Bash or WSL and run:
+./scripts/load-test.sh
+
+# Option 2: In PowerShell (with Git Bash installed), run:
+bash ./scripts/load-test.sh
+
+# If you do not have Bash installed, you can install Git for Windows
+# (https://git-scm.com/download/win) or enable WSL
+# (https://docs.microsoft.com/en-us/windows/wsl/install).
+```
+See TESTING_GUIDE.md for more details and troubleshooting.
+
+---
 ## CI/CD
 
 GitHub Actions pipeline runs on every push to `main`:
