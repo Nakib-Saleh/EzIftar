@@ -4,9 +4,9 @@
   "description": "Order Gateway - API Gateway with JWT Validation & Cache Stock Check",
   "main": "dist/index.js",
   "scripts": {
-    "start": "bun dist/index.js",
-    "dev": "bun --watch src/index.ts",
-    "build": "bun build ./src/index.ts --outdir ./dist --target node",
+    "start": "node init && bun dist/index.js",
+    "dev": "node init && bun --watch src/index.ts",
+    "build": "node init && bun build ./src/index.ts --outdir ./dist --target node",
     "test": "bun test"
   },
   "dependencies": {
